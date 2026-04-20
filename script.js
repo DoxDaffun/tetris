@@ -1,546 +1,755 @@
-const ROWS = 8;
-const COLS = 6;
+// === 盤の種類 ===
+const BOARDS = {
+  segway:     { key: 'segway',     name: 'セグウェイ', alias: 'Scooter', rows: 8, cols: 7,  color: '#58a6ff' },
+  skateboard: { key: 'skateboard', name: 'スケボー',   alias: 'Hover',   rows: 8, cols: 9,  color: '#a77bff' },
+  horse:      { key: 'horse',      name: '馬',         alias: 'Doom',    rows: 8, cols: 12, color: '#ff6666' }
+};
+const BOARD_ORDER = ['segway', 'skateboard', 'horse'];
 
-const COLOR_LIST = [
-  { key: 'lime', label: '黄緑 / Lime', hex: '#9fe870', priority: 1 },
-  { key: 'blue', label: '青 / Blue', hex: '#58a6ff', priority: 2 },
-  { key: 'purple', label: '紫 / Purple', hex: '#a77bff', priority: 3 },
-  { key: 'sparklePurple', label: 'キラ紫 / Sparkle Purple', hex: '#d39bff', priority: 4 },
-  { key: 'orange', label: 'オレンジ / Orange', hex: '#ffad5a', priority: 5 },
-  { key: 'sparkleOrange', label: 'キラ橙 / Sparkle Orange', hex: '#ffd27a', priority: 6 },
-  { key: 'red', label: '赤 / Red', hex: '#ff6666', priority: 7 }
+// === 品質 (grade) ===
+// 紫 (excellent) は旧キラ紫の色を、金 (epic) は旧キラ橙の色を流用。
+// 紫+1, 金+1 は同色にスパークル表現を重ねて上位種を表現。
+const GRADES = [
+  { key: 'good',          label: '緑 (good)',        hex: '#9fe870', priority: 1, sparkle: false },
+  { key: 'better',        label: '青 (better)',      hex: '#58a6ff', priority: 2, sparkle: false },
+  { key: 'excellent',     label: '紫 (excellent)',   hex: '#d39bff', priority: 3, sparkle: false },
+  { key: 'excellentPlus', label: '紫+1 (excellent+1)', hex: '#d39bff', priority: 4, sparkle: true  },
+  { key: 'epic',          label: '金 (epic)',        hex: '#ffd27a', priority: 5, sparkle: false },
+  { key: 'epicPlus',      label: '金+1 (epic+1)',    hex: '#ffd27a', priority: 6, sparkle: true  },
+  { key: 'legend',        label: '赤 (legend)',      hex: '#ff6666', priority: 7, sparkle: false }
 ];
-const colorMap = Object.fromEntries(COLOR_LIST.map(c => [c.key, c]));
+const gradeMap = Object.fromEntries(GRADES.map(g => [g.key, g]));
 
-const ORIENTATIONS = {
-  O: [{ name: '0°', coords: [[0, 0], [0, 1], [1, 0], [1, 1]] }],
+// === 形状 ===
+const SHAPES = ['O', 'I', 'T', 'L', 'J'];
+const SHAPE_ORIENTATIONS = {
+  O: [[[0,0],[0,1],[1,0],[1,1]]],
   I: [
-    { name: '横 / Horizontal', coords: [[0, 0], [0, 1], [0, 2], [0, 3]] },
-    { name: '縦 / Vertical', coords: [[0, 0], [1, 0], [2, 0], [3, 0]] }
+    [[0,0],[0,1],[0,2],[0,3]],
+    [[0,0],[1,0],[2,0],[3,0]]
   ],
   T: [
-    { name: 'Up', coords: [[0, 0], [0, 1], [0, 2], [1, 1]] },
-    { name: 'Right', coords: [[0, 1], [1, 0], [1, 1], [2, 1]] },
-    { name: 'Down', coords: [[0, 1], [1, 0], [1, 1], [1, 2]] },
-    { name: 'Left', coords: [[0, 0], [1, 0], [1, 1], [2, 0]] }
+    [[0,0],[0,1],[0,2],[1,1]],
+    [[0,1],[1,0],[1,1],[2,1]],
+    [[0,1],[1,0],[1,1],[1,2]],
+    [[0,0],[1,0],[1,1],[2,0]]
   ],
   L: [
-    { name: 'Up', coords: [[0, 0], [1, 0], [2, 0], [2, 1]] },
-    { name: 'Right', coords: [[0, 0], [0, 1], [0, 2], [1, 0]] },
-    { name: 'Down', coords: [[0, 0], [0, 1], [1, 1], [2, 1]] },
-    { name: 'Left', coords: [[0, 2], [1, 0], [1, 1], [1, 2]] }
+    [[0,0],[1,0],[2,0],[2,1]],
+    [[0,0],[0,1],[0,2],[1,0]],
+    [[0,0],[0,1],[1,1],[2,1]],
+    [[0,2],[1,0],[1,1],[1,2]]
   ],
   J: [
-    { name: 'Up', coords: [[0, 1], [1, 1], [2, 0], [2, 1]] },
-    { name: 'Right', coords: [[0, 0], [1, 0], [1, 1], [1, 2]] },
-    { name: 'Down', coords: [[0, 0], [0, 1], [1, 0], [2, 0]] },
-    { name: 'Left', coords: [[0, 0], [0, 1], [0, 2], [1, 2]] }
+    [[0,1],[1,1],[2,0],[2,1]],
+    [[0,0],[1,0],[1,1],[1,2]],
+    [[0,0],[0,1],[1,0],[2,0]],
+    [[0,0],[0,1],[0,2],[1,2]]
   ]
 };
 
+// === 状態 ===
 const state = {
-  mode: 'auto',
-  paintMode: 'paint',
-  paintColor: 'red',
-  board: Array.from({ length: ROWS }, () => Array(COLS).fill(null)),
-  locked: Array.from({ length: ROWS }, () => Array(COLS).fill(false)),
-  pieces: [],
-  hint: null,
-  dragPieceId: null
+  boardsUsed: { segway: true, skateboard: false, horse: false },
+  mainBoard: 'segway',
+  paintMode: 'paint',            // 'paint' | 'erase'
+  manualPlacement: false,
+  paintGrade: 'better',
+  manualGrade: 'better',
+  manualShape: 'T',
+  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]] }
+  inventory: {},                 // gradeKey -> shapeKey -> count
+  solveResult: null              // { placements, unused }
 };
 
-const el = {
-  board: document.getElementById('board'),
-  paintColor: document.getElementById('paintColor'),
-  paintToggle: document.getElementById('paintToggle'),
-  eraseToggle: document.getElementById('eraseToggle'),
-  resetBoard: document.getElementById('resetBoard'),
-  resetAll: document.getElementById('resetAll'),
-  piecesList: document.getElementById('piecesList'),
-  addPiece: document.getElementById('addPiece'),
-  solveBtn: document.getElementById('solveBtn'),
-  hintBtn: document.getElementById('hintBtn'),
-  applyHintBtn: document.getElementById('applyHintBtn'),
-  status: document.getElementById('status'),
-  modeAuto: document.getElementById('modeAuto'),
-  modeManual: document.getElementById('modeManual'),
-  lineSummary: document.getElementById('lineSummary'),
-  pieceRowTemplate: document.getElementById('pieceRowTemplate')
-};
-
-function uid() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function initState() {
+  for (const key of BOARD_ORDER) {
+    const { rows, cols } = BOARDS[key];
+    state.boards[key] = {
+      cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      locked: Array.from({ length: rows }, () => Array(cols).fill(false))
+    };
+  }
+  for (const g of GRADES) {
+    state.inventory[g.key] = {};
+    for (const s of SHAPES) state.inventory[g.key][s] = 0;
+  }
 }
 
-function init() {
-  COLOR_LIST.forEach(c => {
-    const option = document.createElement('option');
-    option.value = c.key;
-    option.textContent = c.label;
-    el.paintColor.append(option);
-  });
+// === 永続化 (localStorage) ===
+const STORAGE_KEY = 'unit-optimizer:v1';
 
-  el.paintColor.value = state.paintColor;
-  el.paintColor.addEventListener('change', () => (state.paintColor = el.paintColor.value));
+function saveState() {
+  try {
+    const snapshot = {
+      boardsUsed: state.boardsUsed,
+      mainBoard: state.mainBoard,
+      paintGrade: state.paintGrade,
+      manualGrade: state.manualGrade,
+      manualShape: state.manualShape,
+      boards: state.boards,
+      inventory: state.inventory,
+      solveResult: state.solveResult
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  } catch (e) {
+    // ストレージ不可 (プライベートモード等) はサイレントに無視
+  }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const snap = JSON.parse(raw);
+    if (!snap || typeof snap !== 'object') return;
+
+    if (snap.boardsUsed && typeof snap.boardsUsed === 'object') {
+      for (const k of BOARD_ORDER) {
+        if (typeof snap.boardsUsed[k] === 'boolean') state.boardsUsed[k] = snap.boardsUsed[k];
+      }
+    }
+    if (BOARD_ORDER.includes(snap.mainBoard)) state.mainBoard = snap.mainBoard;
+    if (gradeMap[snap.paintGrade])  state.paintGrade  = snap.paintGrade;
+    if (gradeMap[snap.manualGrade]) state.manualGrade = snap.manualGrade;
+    if (SHAPES.includes(snap.manualShape)) state.manualShape = snap.manualShape;
+
+    // 盤面: サイズが一致する時のみ採用 (仕様変更時の破損回避)
+    if (snap.boards && typeof snap.boards === 'object') {
+      for (const k of BOARD_ORDER) {
+        const meta = BOARDS[k];
+        const saved = snap.boards[k];
+        if (!saved || !Array.isArray(saved.cells) || !Array.isArray(saved.locked)) continue;
+        if (saved.cells.length !== meta.rows) continue;
+        if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
+        state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
+        state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
+      }
+    }
+
+    // 在庫
+    if (snap.inventory && typeof snap.inventory === 'object') {
+      for (const g of GRADES) {
+        const row = snap.inventory[g.key];
+        if (!row) continue;
+        for (const s of SHAPES) {
+          const n = Number(row[s]);
+          if (Number.isFinite(n) && n >= 0) state.inventory[g.key][s] = Math.floor(n);
+        }
+      }
+    }
+
+    // 未使用表示の復元
+    if (snap.solveResult && Array.isArray(snap.solveResult.unused)) {
+      state.solveResult = {
+        placements: Array.isArray(snap.solveResult.placements) ? snap.solveResult.placements : [],
+        unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
+      };
+    }
+  } catch (e) {
+    // パース失敗時はデフォルトのまま続行
+  }
+}
+
+// === DOM参照 ===
+const el = {};
+function cacheEls() {
+  el.boardSelect = document.getElementById('boardSelect');
+  el.boards = document.getElementById('boards');
+  el.paintGrade = document.getElementById('paintGrade');
+  el.paintToggle = document.getElementById('paintToggle');
+  el.eraseToggle = document.getElementById('eraseToggle');
+  el.manualToggle = document.getElementById('manualToggle');
+  el.resetBoard = document.getElementById('resetBoard');
+  el.solveBtn = document.getElementById('solveBtn');
+  el.status = document.getElementById('status');
+  el.inventory = document.getElementById('inventory');
+  el.unusedPanel = document.getElementById('unusedPanel');
+  el.unusedList = document.getElementById('unusedList');
+}
+
+// === 初期化 ===
+function init() {
+  cacheEls();
+  initState();
+  loadState();
+
+  // 塗る用品質セレクト
+  for (const g of GRADES) {
+    const opt = document.createElement('option');
+    opt.value = g.key;
+    opt.textContent = g.label;
+    el.paintGrade.append(opt);
+  }
+  el.paintGrade.value = state.paintGrade;
+  el.paintGrade.addEventListener('change', () => {
+    state.paintGrade = el.paintGrade.value;
+    saveState();
+  });
 
   el.paintToggle.addEventListener('click', () => setPaintMode('paint'));
   el.eraseToggle.addEventListener('click', () => setPaintMode('erase'));
-  el.resetBoard.addEventListener('click', resetBoardOnly);
-  el.resetAll.addEventListener('click', resetAll);
-  el.addPiece.addEventListener('click', () => addPiece());
-  el.solveBtn.addEventListener('click', runAutoSolve);
-  el.hintBtn.addEventListener('click', runHint);
-  el.applyHintBtn.addEventListener('click', applyHint);
-  el.modeAuto.addEventListener('click', () => setMode('auto'));
-  el.modeManual.addEventListener('click', () => setMode('manual'));
-  window.addEventListener('keydown', (e) => {
-    if (e.key.toLowerCase() !== 'r' || !state.dragPieceId) return;
-    const piece = state.pieces.find(p => p.id === state.dragPieceId);
-    if (!piece) return;
-    rotatePiece(piece);
-    renderPieces();
-    renderBoardFromPlaced();
-    setStatus('Rotated selected piece / 選択ピースを回転');
+  el.manualToggle.addEventListener('click', () => toggleManual());
+  el.resetBoard.addEventListener('click', resetBoards);
+  el.solveBtn.addEventListener('click', runSolve);
+
+  renderBoardSelect();
+  renderBoards();
+  renderInventory();
+  renderUnused();
+}
+
+// === 盤選択 UI ===
+function renderBoardSelect() {
+  el.boardSelect.innerHTML = '';
+  for (const key of BOARD_ORDER) {
+    const b = BOARDS[key];
+    const card = document.createElement('div');
+    card.className = 'board-opt';
+    card.style.setProperty('--board-color', b.color);
+    card.dataset.board = key;
+    if (state.boardsUsed[key]) card.classList.add('used');
+    if (state.mainBoard === key) card.classList.add('main');
+
+    const title = document.createElement('div');
+    title.className = 'board-opt-title';
+    title.textContent = `${b.name} (${b.alias})`;
+
+    const useLabel = document.createElement('label');
+    useLabel.className = 'chk';
+    const useChk = document.createElement('input');
+    useChk.type = 'checkbox';
+    useChk.checked = state.boardsUsed[key];
+    useChk.addEventListener('change', () => {
+      state.boardsUsed[key] = useChk.checked;
+      if (!useChk.checked && state.mainBoard === key) {
+        state.mainBoard = BOARD_ORDER.find(k => state.boardsUsed[k]) || null;
+      }
+      if (useChk.checked && !state.mainBoard) state.mainBoard = key;
+      saveState();
+      renderBoardSelect();
+      renderBoards();
+    });
+    useLabel.append(useChk, document.createTextNode(' 使用'));
+
+    const mainLabel = document.createElement('label');
+    mainLabel.className = 'chk';
+    const mainRadio = document.createElement('input');
+    mainRadio.type = 'radio';
+    mainRadio.name = 'mainBoard';
+    mainRadio.checked = state.mainBoard === key;
+    mainRadio.disabled = !state.boardsUsed[key];
+    mainRadio.addEventListener('change', () => {
+      if (!state.boardsUsed[key]) return;
+      state.mainBoard = key;
+      saveState();
+      renderBoardSelect();
+      renderBoards();
+    });
+    mainLabel.append(mainRadio, document.createTextNode(' メイン'));
+
+    card.append(title, useLabel, mainLabel);
+    el.boardSelect.append(card);
+  }
+}
+
+// === 盤のレンダリング ===
+function renderBoards() {
+  el.boards.innerHTML = '';
+  const keys = selectedBoardKeys();
+  if (keys.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'hint-text';
+    empty.textContent = '使用する盤を選択してください。';
+    el.boards.append(empty);
+    return;
+  }
+  for (const key of keys) renderOneBoard(key);
+}
+
+function selectedBoardKeys() {
+  const used = BOARD_ORDER.filter(k => state.boardsUsed[k]);
+  if (!used.length) return [];
+  used.sort((a, b) => {
+    if (a === state.mainBoard) return -1;
+    if (b === state.mainBoard) return 1;
+    return 0;
   });
-
-  renderBoard();
-  for (let i = 0; i < 8; i++) addPiece();
-  renderPieces();
+  return used;
 }
 
-function setMode(mode) {
-  state.mode = mode;
-  el.modeAuto.classList.toggle('active', mode === 'auto');
-  el.modeManual.classList.toggle('active', mode === 'manual');
-  setStatus(mode === 'auto' ? 'Auto mode / 自動モード' : 'Manual mode / 手動モード');
+function renderOneBoard(key) {
+  const meta = BOARDS[key];
+  const bs = state.boards[key];
+
+  const wrap = document.createElement('div');
+  wrap.className = 'board-wrap';
+  wrap.style.setProperty('--board-color', meta.color);
+  if (state.mainBoard === key) wrap.classList.add('main');
+
+  const title = document.createElement('div');
+  title.className = 'board-title';
+  const badge = state.mainBoard === key ? ' ★メイン' : '';
+  title.textContent = `${meta.name} (${meta.alias})${badge}`;
+  wrap.append(title);
+
+  const grid = document.createElement('div');
+  grid.className = 'board';
+  grid.style.gridTemplateColumns = `repeat(${meta.cols}, var(--cell))`;
+  grid.style.gridTemplateRows = `repeat(${meta.rows}, var(--cell))`;
+
+  const lines = fullLinesOf(bs.cells);
+  const lineSet = new Set(lines);
+
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      const div = document.createElement('div');
+      div.className = 'cell';
+      const grade = bs.cells[r][c];
+      if (grade) {
+        const g = gradeMap[grade];
+        div.style.background = g.hex;
+        if (g.sparkle) div.classList.add('sparkle');
+      }
+      if (bs.locked[r][c]) div.classList.add('prefilled');
+      if (lineSet.has(r)) div.classList.add('line');
+      div.addEventListener('click', () => onCellClick(key, r, c));
+      grid.append(div);
+    }
+  }
+  wrap.append(grid);
+
+  const info = document.createElement('div');
+  info.className = 'board-info';
+  info.textContent = `揃ったライン: ${lines.length} / ${meta.rows}`;
+  wrap.append(info);
+
+  el.boards.append(wrap);
 }
 
+function fullLinesOf(cells) {
+  const lines = [];
+  for (let r = 0; r < cells.length; r++) {
+    if (cells[r].every(Boolean)) lines.push(r);
+  }
+  return lines;
+}
+
+// === クリック ===
+function onCellClick(boardKey, r, c) {
+  if (state.manualPlacement) {
+    tryManualPlace(boardKey, r, c);
+    return;
+  }
+  const bs = state.boards[boardKey];
+  if (state.paintMode === 'erase') {
+    bs.cells[r][c] = null;
+    bs.locked[r][c] = false;
+  } else {
+    bs.cells[r][c] = state.paintGrade;
+    bs.locked[r][c] = true;
+  }
+  state.solveResult = null;
+  saveState();
+  renderBoards();
+  renderUnused();
+}
+
+// === モード切り替え ===
 function setPaintMode(mode) {
   state.paintMode = mode;
   el.paintToggle.classList.toggle('active', mode === 'paint');
   el.eraseToggle.classList.toggle('active', mode === 'erase');
+  if (state.manualPlacement) toggleManual(); // 強制的にOFF
 }
 
-function addPiece(data = null) {
-  const piece = data || { id: uid(), shape: 'T', orientation: 0, color: 'red', placed: null };
-  state.pieces.push(piece);
-  renderPieces();
-}
-
-function removePiece(id) {
-  const idx = state.pieces.findIndex(p => p.id === id);
-  if (idx >= 0) state.pieces.splice(idx, 1);
-  renderPieces();
-  renderBoard();
-}
-
-function getPieceCoords(piece) {
-  return ORIENTATIONS[piece.shape][piece.orientation].coords;
-}
-
-function paintCell(r, c) {
-  if (state.paintMode === 'erase') {
-    state.board[r][c] = null;
-    state.locked[r][c] = false;
+function toggleManual() {
+  state.manualPlacement = !state.manualPlacement;
+  el.manualToggle.classList.toggle('active', state.manualPlacement);
+  if (state.manualPlacement) {
+    showManualPicker();
+    setStatus('手動配置モード: 形状と品質を選択してから盤面をクリック');
   } else {
-    state.board[r][c] = state.paintColor;
-    state.locked[r][c] = true;
+    hideManualPicker();
+    setStatus('手動配置モード OFF');
   }
-  renderBoard();
 }
 
-function renderBoard(lines = [], hintCells = []) {
-  el.board.innerHTML = '';
-  const lineSet = new Set(lines);
-  const hintSet = new Set(hintCells.map(([r, c]) => `${r},${c}`));
+// === 手動配置のピッカー (シンプルなポップオーバー) ===
+let manualPicker = null;
+function showManualPicker() {
+  if (manualPicker) manualPicker.remove();
+  manualPicker = document.createElement('div');
+  manualPicker.className = 'manual-picker';
 
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const div = document.createElement('div');
-      div.className = 'cell';
-      if (state.board[r][c]) {
-        div.style.background = colorMap[state.board[r][c]].hex;
+  const shapeLbl = document.createElement('label');
+  shapeLbl.textContent = '形状 ';
+  const shapeSel = document.createElement('select');
+  for (const s of SHAPES) {
+    const o = document.createElement('option');
+    o.value = s; o.textContent = s; shapeSel.append(o);
+  }
+  shapeSel.value = state.manualShape;
+  shapeSel.addEventListener('change', () => { state.manualShape = shapeSel.value; saveState(); });
+  shapeLbl.append(shapeSel);
+
+  const gradeLbl = document.createElement('label');
+  gradeLbl.textContent = ' 品質 ';
+  const gradeSel = document.createElement('select');
+  for (const g of GRADES) {
+    const o = document.createElement('option');
+    o.value = g.key; o.textContent = g.label; gradeSel.append(o);
+  }
+  gradeSel.value = state.manualGrade;
+  gradeSel.addEventListener('change', () => { state.manualGrade = gradeSel.value; saveState(); });
+  gradeLbl.append(gradeSel);
+
+  const note = document.createElement('span');
+  note.className = 'hint-text';
+  note.textContent = ' (回転はツールが自動で最適化時に考慮します)';
+
+  manualPicker.append(shapeLbl, gradeLbl, note);
+  el.manualToggle.after(manualPicker);
+}
+function hideManualPicker() {
+  if (manualPicker) { manualPicker.remove(); manualPicker = null; }
+}
+
+function tryManualPlace(boardKey, r, c) {
+  const bs = state.boards[boardKey];
+  const meta = BOARDS[boardKey];
+  const shape = state.manualShape;
+  const grade = state.manualGrade;
+  // 全向きを試し、最初にフィットするものを採用
+  for (const orient of SHAPE_ORIENTATIONS[shape]) {
+    if (fitsAt(bs.cells, orient, r, c, meta)) {
+      for (const [dr, dc] of orient) {
+        bs.cells[r + dr][c + dc] = grade;
+        bs.locked[r + dr][c + dc] = true;
       }
-      if (state.locked[r][c]) div.classList.add('prefilled');
-      if (lineSet.has(r)) div.classList.add('line');
-      if (hintSet.has(`${r},${c}`)) div.classList.add('hint');
-
-      div.addEventListener('click', () => {
-        if (state.mode === 'manual' && state.dragPieceId) {
-          placeDraggedPiece(r, c);
-          return;
-        }
-        paintCell(r, c);
-      });
-
-      div.addEventListener('dragover', (e) => e.preventDefault());
-      div.addEventListener('drop', (e) => {
-        e.preventDefault();
-        if (state.mode !== 'manual') return;
-        const id = e.dataTransfer.getData('text/plain');
-        state.dragPieceId = id;
-        placeDraggedPiece(r, c);
-      });
-
-      el.board.append(div);
+      state.solveResult = null;
+      saveState();
+      renderBoards();
+      renderUnused();
+      setStatus(`手動配置: ${shape}(${gradeMap[grade].label}) @ (${r},${c})`);
+      return;
     }
   }
-
-  const scored = evaluateBoard(state.board);
-  el.lineSummary.textContent = `Lines: ${scored.lineCount} / ${ROWS} | Color score: ${scored.colorScore}`;
+  setStatus('配置できません / 重なる or はみ出す');
 }
 
-function renderPieces() {
-  el.piecesList.innerHTML = '';
-  state.pieces.forEach(piece => {
-    const row = el.pieceRowTemplate.content.firstElementChild.cloneNode(true);
-    row.dataset.id = piece.id;
-
-    const shapeSel = row.querySelector('.shape');
-    ['O', 'I', 'T', 'L', 'J'].forEach(shape => {
-      const opt = document.createElement('option');
-      opt.value = shape;
-      opt.textContent = shape;
-      shapeSel.append(opt);
-    });
-    shapeSel.value = piece.shape;
-
-    const orientSel = row.querySelector('.orientation');
-    const colorSel = row.querySelector('.color');
-    COLOR_LIST.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.key;
-      opt.textContent = c.label;
-      colorSel.append(opt);
-    });
-    colorSel.value = piece.color;
-
-    const syncOrientation = () => {
-      orientSel.innerHTML = '';
-      ORIENTATIONS[piece.shape].forEach((o, i) => {
-        const opt = document.createElement('option');
-        opt.value = i;
-        opt.textContent = o.name;
-        orientSel.append(opt);
-      });
-      if (piece.orientation >= ORIENTATIONS[piece.shape].length) piece.orientation = 0;
-      orientSel.value = piece.orientation;
-    };
-
-    syncOrientation();
-
-    shapeSel.addEventListener('change', () => {
-      piece.shape = shapeSel.value;
-      piece.orientation = 0;
-      piece.placed = null;
-      syncOrientation();
-      updateMiniPreview(row, piece);
-      renderBoard();
-    });
-    orientSel.addEventListener('change', () => {
-      piece.orientation = Number(orientSel.value);
-      piece.placed = null;
-      updateMiniPreview(row, piece);
-      renderBoard();
-    });
-    colorSel.addEventListener('change', () => {
-      piece.color = colorSel.value;
-      renderBoardFromPlaced();
-    });
-
-    row.querySelector('.remove').addEventListener('click', () => removePiece(piece.id));
-    row.querySelector('.rotate').addEventListener('click', (e) => {
-      e.stopPropagation();
-      rotatePiece(piece);
-      renderPieces();
-      renderBoardFromPlaced();
-    });
-    row.draggable = true;
-    row.addEventListener('dragstart', (e) => {
-      if (state.mode !== 'manual') return;
-      e.dataTransfer.setData('text/plain', piece.id);
-      state.dragPieceId = piece.id;
-    });
-    row.addEventListener('click', () => {
-      if (state.mode === 'manual') {
-        state.dragPieceId = piece.id;
-        setStatus('Click board to place (R=rotate) / クリックで配置（Rで回転）');
-      }
-    });
-
-    updateMiniPreview(row, piece);
-    el.piecesList.append(row);
-  });
-}
-
-function updateMiniPreview(row, piece) {
-  const pv = row.querySelector('.mini-preview');
-  pv.innerHTML = '';
-  const coords = getPieceCoords(piece);
-  const minR = Math.min(...coords.map(c => c[0]));
-  const minC = Math.min(...coords.map(c => c[1]));
-  coords.forEach(([r, c]) => {
-    const b = document.createElement('div');
-    b.className = 'mini-block';
-    b.style.left = `${(c - minC) * 12 + 5}px`;
-    b.style.top = `${(r - minR) * 12 + 5}px`;
-    b.style.background = colorMap[piece.color].hex;
-    pv.append(b);
-  });
-}
-
-
-function rotatePiece(piece) {
-  const max = ORIENTATIONS[piece.shape].length;
-  piece.orientation = (piece.orientation + 1) % max;
-  if (piece.placed) {
-    const { r, c } = piece.placed;
-    clearDynamicBoardCells();
-    for (const p of state.pieces) {
-      if (p.id === piece.id || !p.placed) continue;
-      for (const [dr, dc] of getPieceCoords(p)) {
-        state.board[p.placed.r + dr][p.placed.c + dc] = p.color;
-      }
-    }
-    if (!canPlace(piece, r, c, false, null, state.board)) {
-      piece.placed = null;
-      setStatus('Rotation invalid at current spot; piece removed / 回転後に重なるため未配置化');
-    }
-  }
-}
-
-function clearDynamicBoardCells() {
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      if (!state.locked[r][c]) state.board[r][c] = null;
-    }
-  }
-}
-
-function renderBoardFromPlaced() {
-  clearDynamicBoardCells();
-  for (const piece of state.pieces) {
-    if (!piece.placed) continue;
-    for (const [dr, dc] of getPieceCoords(piece)) {
-      const rr = piece.placed.r + dr;
-      const cc = piece.placed.c + dc;
-      if (inside(rr, cc)) state.board[rr][cc] = piece.color;
-    }
-  }
-  const score = evaluateBoard(state.board);
-  renderBoard(score.lines);
-}
-
-function placeDraggedPiece(r, c) {
-  const piece = state.pieces.find(p => p.id === state.dragPieceId);
-  if (!piece) return;
-
-  const valid = canPlace(piece, r, c, true, piece.id);
-  if (!valid) {
-    setStatus('Invalid placement / 配置不可');
-    return;
-  }
-  piece.placed = { r, c };
-  renderBoardFromPlaced();
-  setStatus('Placed / 配置完了');
-}
-
-function canPlace(piece, baseR, baseC, ignoreCurrentPiece = false, pieceId = null, board = state.board) {
-  for (const [dr, dc] of getPieceCoords(piece)) {
-    const r = baseR + dr;
-    const c = baseC + dc;
-    if (!inside(r, c)) return false;
-    if (state.locked[r][c]) return false;
-    const occupiedByOther = board[r][c] !== null;
-    if (!occupiedByOther) continue;
-
-    if (ignoreCurrentPiece && pieceId) {
-      let own = false;
-      const p = state.pieces.find(x => x.id === pieceId);
-      if (p && p.placed) {
-        own = getPieceCoords(p).some(([rr, cc]) => p.placed.r + rr === r && p.placed.c + cc === c);
-      }
-      if (own) continue;
-    }
-    return false;
+function fitsAt(cells, orient, r, c, meta) {
+  for (const [dr, dc] of orient) {
+    const rr = r + dr, cc = c + dc;
+    if (rr < 0 || rr >= meta.rows || cc < 0 || cc >= meta.cols) return false;
+    if (cells[rr][cc] !== null) return false;
   }
   return true;
 }
 
-function inside(r, c) {
-  return r >= 0 && r < ROWS && c >= 0 && c < COLS;
+// === 盤面リセット ===
+function resetBoards() {
+  for (const key of BOARD_ORDER) {
+    const { rows, cols } = BOARDS[key];
+    state.boards[key] = {
+      cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      locked: Array.from({ length: rows }, () => Array(cols).fill(false))
+    };
+  }
+  state.solveResult = null;
+  saveState();
+  renderBoards();
+  renderUnused();
+  setStatus('盤面リセット完了');
 }
 
-function evaluateBoard(board) {
-  const lines = [];
-  let colorScore = 0;
-  for (let r = 0; r < ROWS; r++) {
-    const full = board[r].every(Boolean);
-    if (!full) continue;
-    lines.push(r);
-    for (let c = 0; c < COLS; c++) {
-      colorScore += colorMap[board[r][c]].priority;
+// === 所持ユニット UI (35 スロット) ===
+function renderInventory() {
+  el.inventory.innerHTML = '';
+
+  const table = document.createElement('div');
+  table.className = 'inv-grid';
+
+  // ヘッダ行: 形状
+  table.append(cornerCell(''));
+  for (const s of SHAPES) {
+    const h = document.createElement('div');
+    h.className = 'inv-head';
+    h.textContent = s;
+    table.append(h);
+  }
+
+  // 各品質 × 各形状
+  for (const g of GRADES) {
+    const rowHead = document.createElement('div');
+    rowHead.className = 'inv-row-head';
+    rowHead.style.setProperty('--grade-color', g.hex);
+    if (g.sparkle) rowHead.classList.add('sparkle');
+    rowHead.title = g.label;
+    rowHead.textContent = g.label;
+    table.append(rowHead);
+
+    for (const s of SHAPES) {
+      const cell = document.createElement('div');
+      cell.className = 'inv-cell';
+
+      const preview = document.createElement('div');
+      preview.className = 'inv-preview';
+      drawMiniShape(preview, s, g);
+      cell.append(preview);
+
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '0';
+      input.inputMode = 'numeric';
+      input.value = String(state.inventory[g.key][s] || 0);
+      input.addEventListener('input', () => {
+        const v = Math.max(0, Math.floor(Number(input.value) || 0));
+        state.inventory[g.key][s] = v;
+        saveState();
+      });
+      cell.append(input);
+
+      table.append(cell);
     }
   }
-  return { lineCount: lines.length, lines, colorScore };
+
+  el.inventory.append(table);
 }
 
-function resetBoardOnly() {
-  state.board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
-  state.locked = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
-  state.pieces.forEach(p => (p.placed = null));
-  state.hint = null;
-  renderBoard();
-  setStatus('Board reset / 盤面リセット');
+function cornerCell(text) {
+  const d = document.createElement('div');
+  d.className = 'inv-corner';
+  d.textContent = text;
+  return d;
 }
 
-function resetAll() {
-  resetBoardOnly();
-  state.pieces = [];
-  for (let i = 0; i < 8; i++) addPiece();
-  renderPieces();
-  setStatus('All reset / 全リセット');
+function drawMiniShape(container, shape, grade) {
+  container.innerHTML = '';
+  const coords = SHAPE_ORIENTATIONS[shape][0];
+  const maxR = Math.max(...coords.map(c => c[0]));
+  const maxC = Math.max(...coords.map(c => c[1]));
+  const cell = 6;
+  const w = (maxC + 1) * cell;
+  const h = (maxR + 1) * cell;
+  container.style.width = `${w}px`;
+  container.style.height = `${h}px`;
+  for (const [r, c] of coords) {
+    const b = document.createElement('div');
+    b.className = 'mini-block';
+    b.style.left = `${c * cell}px`;
+    b.style.top = `${r * cell}px`;
+    b.style.width = `${cell}px`;
+    b.style.height = `${cell}px`;
+    b.style.background = grade.hex;
+    if (grade.sparkle) b.classList.add('sparkle');
+    container.append(b);
+  }
+}
+
+// === ソルバー ===
+function runSolve() {
+  const keys = selectedBoardKeys();
+  if (keys.length === 0) {
+    setStatus('使用する盤を選択してください');
+    return;
+  }
+
+  // インベントリを「ピースインスタンス」群へ展開。品質の高い順＋サイズの大きい順で並べる。
+  const pieces = [];
+  for (const g of GRADES) {
+    for (const s of SHAPES) {
+      const n = state.inventory[g.key][s] | 0;
+      for (let i = 0; i < n; i++) {
+        pieces.push({ id: `${g.key}_${s}_${i}`, shape: s, grade: g.key });
+      }
+    }
+  }
+  pieces.sort((a, b) => {
+    const pg = gradeMap[b.grade].priority - gradeMap[a.grade].priority;
+    if (pg !== 0) return pg;
+    const szA = SHAPE_ORIENTATIONS[a.shape][0].length;
+    const szB = SHAPE_ORIENTATIONS[b.shape][0].length;
+    return szB - szA;
+  });
+
+  // 盤ごとに固定(locked)と既存配置の状態をコピー
+  const boardStates = {};
+  for (const k of keys) {
+    boardStates[k] = {
+      cells: state.boards[k].cells.map(r => r.slice()),
+      locked: state.boards[k].locked.map(r => r.slice()),
+      meta: BOARDS[k]
+    };
+  }
+
+  // 既存の非ロックセルはソルバー用にクリア(前回の配置を消す)
+  for (const k of keys) {
+    for (let r = 0; r < boardStates[k].meta.rows; r++) {
+      for (let c = 0; c < boardStates[k].meta.cols; c++) {
+        if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
+      }
+    }
+  }
+
+  const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
+  const used = new Set();
+
+  // 盤の優先順: selectedBoardKeys() がメインを先頭にする
+  for (const k of keys) {
+    fillBoardGreedy(boardStates[k], pieces, used, placements, k);
+  }
+
+  // 反映
+  for (const k of keys) {
+    state.boards[k].cells = boardStates[k].cells;
+    // locked は変更しない (ユーザー指定のみ locked)
+  }
+  const unused = pieces.filter(p => !used.has(p.id));
+  state.solveResult = { placements, unused };
+
+  saveState();
+  renderBoards();
+  renderUnused();
+
+  let msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
+  const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
+  setStatus(`${msg} | ラインs ${lineSummary}`);
+}
+
+// 1盤を貪欲+ライトなローカル探索で埋める。
+// 方針: 残っている位置のうち最も「左上」のセルを起点に、そのセルを埋められるユニットを
+// 現状の評価値が最大になるように選ぶ。評価値はライン完成重視＋品質スコア。
+function fillBoardGreedy(boardState, pieces, used, placements, boardKey) {
+  const { meta } = boardState;
+  while (true) {
+    const empty = findTopLeftEmpty(boardState.cells, meta);
+    if (!empty) break;
+
+    let best = null;
+    for (const piece of pieces) {
+      if (used.has(piece.id)) continue;
+      for (const orient of SHAPE_ORIENTATIONS[piece.shape]) {
+        for (const [dr, dc] of orient) {
+          const baseR = empty.r - dr;
+          const baseC = empty.c - dc;
+          if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
+          const score = scorePlacement(boardState.cells, orient, baseR, baseC, meta, piece);
+          if (!best || score > best.score) {
+            best = { score, piece, orient, baseR, baseC };
+          }
+        }
+      }
+    }
+
+    if (!best) {
+      // このセルは埋められない → そのセルをスキップ扱いにするため、番兵として次のループで同じ場所を見ないよう
+      // 「埋められない印」を一時的に入れる必要はない。以下でセルを探し直すだけ。
+      // 左上から探すので、このセルが残っている限り無限ループになる → 強制的に抜ける。
+      boardState.cells[empty.r][empty.c] = '__SKIP__';
+      continue;
+    }
+
+    // 配置
+    const cells = [];
+    for (const [dr, dc] of best.orient) {
+      const rr = best.baseR + dr;
+      const cc = best.baseC + dc;
+      boardState.cells[rr][cc] = best.piece.grade;
+      cells.push([rr, cc]);
+    }
+    used.add(best.piece.id);
+    placements.push({ boardKey, pieceId: best.piece.id, grade: best.piece.grade, cells });
+  }
+
+  // 番兵を戻す
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      if (boardState.cells[r][c] === '__SKIP__') boardState.cells[r][c] = null;
+    }
+  }
+}
+
+function findTopLeftEmpty(cells, meta) {
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      if (cells[r][c] === null) return { r, c };
+    }
+  }
+  return null;
+}
+
+function canPlaceOrient(cells, orient, baseR, baseC, meta) {
+  for (const [dr, dc] of orient) {
+    const r = baseR + dr, c = baseC + dc;
+    if (r < 0 || r >= meta.rows || c < 0 || c >= meta.cols) return false;
+    if (cells[r][c] !== null) return false;
+  }
+  return true;
+}
+
+function scorePlacement(cells, orient, baseR, baseC, meta, piece) {
+  // 仮置きして評価
+  const placed = [];
+  for (const [dr, dc] of orient) {
+    const r = baseR + dr, c = baseC + dc;
+    cells[r][c] = piece.grade;
+    placed.push([r, c]);
+  }
+  let completedLines = 0;
+  const affectedRows = new Set(placed.map(p => p[0]));
+  const isRealCell = v => v && v !== '__SKIP__';
+  for (const r of affectedRows) {
+    if (cells[r].every(isRealCell)) completedLines++;
+  }
+  // 行の埋まり率(密集)を加点
+  let denseScore = 0;
+  for (const r of affectedRows) {
+    const filled = cells[r].filter(isRealCell).length;
+    denseScore += filled;
+  }
+  // 戻す
+  for (const [r, c] of placed) cells[r][c] = null;
+
+  const gradeScore = gradeMap[piece.grade].priority;
+  return completedLines * 10000 + denseScore * 10 + gradeScore;
+}
+
+// === 未使用ユニット表示 ===
+function renderUnused() {
+  const res = state.solveResult;
+  if (!res || res.unused.length === 0) {
+    el.unusedPanel.hidden = true;
+    el.unusedList.innerHTML = '';
+    return;
+  }
+  el.unusedPanel.hidden = false;
+  el.unusedList.innerHTML = '';
+
+  // 集計: grade × shape -> count
+  const counts = {};
+  for (const p of res.unused) {
+    const k = `${p.grade}_${p.shape}`;
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  for (const [k, n] of Object.entries(counts)) {
+    const [gradeKey, shape] = k.split('_');
+    const g = gradeMap[gradeKey];
+    const chip = document.createElement('div');
+    chip.className = 'unused-chip';
+    const preview = document.createElement('div');
+    preview.className = 'inv-preview';
+    drawMiniShape(preview, shape, g);
+    chip.append(preview);
+    const cnt = document.createElement('span');
+    cnt.textContent = `× ${n}`;
+    chip.append(cnt);
+    el.unusedList.append(chip);
+  }
 }
 
 function setStatus(msg) {
   el.status.textContent = msg;
-}
-
-function buildLockedBoard() {
-  const b = Array.from({ length: ROWS }, (_, r) => Array.from({ length: COLS }, (_, c) => (state.locked[r][c] ? state.board[r][c] : null)));
-  return b;
-}
-
-function possiblePlacements(piece, board) {
-  const out = [];
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      let ok = true;
-      for (const [dr, dc] of getPieceCoords(piece)) {
-        const rr = r + dr;
-        const cc = c + dc;
-        if (!inside(rr, cc) || board[rr][cc] !== null) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) out.push({ r, c });
-    }
-  }
-  return out;
-}
-
-function placeOnBoard(board, piece, pos) {
-  const copy = board.map(row => row.slice());
-  for (const [dr, dc] of getPieceCoords(piece)) {
-    copy[pos.r + dr][pos.c + dc] = piece.color;
-  }
-  return copy;
-}
-
-function cmpScore(a, b) {
-  if (a.lineCount !== b.lineCount) return b.lineCount - a.lineCount;
-  if (a.colorScore !== b.colorScore) return b.colorScore - a.colorScore;
-  return 0;
-}
-
-function solveBest(piecesInput, boardInput, maxNodes = 120000) {
-  let nodes = 0;
-  let best = { score: evaluateBoard(boardInput), board: boardInput, placements: [] };
-
-  const pieces = piecesInput.slice();
-  pieces.sort((a, b) => getPieceCoords(b).length - getPieceCoords(a).length);
-
-  function dfs(idx, board, placements) {
-    nodes += 1;
-    if (nodes > maxNodes) return;
-    const score = evaluateBoard(board);
-    if (cmpScore(score, best.score) < 0) {
-      best = { score, board, placements: placements.slice() };
-      if (score.lineCount === ROWS) return;
-    }
-
-    if (idx >= pieces.length) return;
-
-    const remaining = pieces.length - idx;
-    const maxLinesPossible = Math.min(ROWS, score.lineCount + remaining);
-    if (maxLinesPossible < best.score.lineCount) return;
-
-    const piece = pieces[idx];
-    const spots = possiblePlacements(piece, board);
-
-    dfs(idx + 1, board, placements);
-
-    for (const pos of spots) {
-      const nextBoard = placeOnBoard(board, piece, pos);
-      placements.push({ pieceId: piece.id, r: pos.r, c: pos.c });
-      dfs(idx + 1, nextBoard, placements);
-      placements.pop();
-      if (nodes > maxNodes) return;
-    }
-  }
-
-  dfs(0, boardInput, []);
-  return { ...best, nodesExplored: nodes, truncated: nodes > maxNodes };
-}
-
-function runAutoSolve() {
-  state.pieces.forEach(p => (p.placed = null));
-  const lockedBoard = buildLockedBoard();
-  const result = solveBest(state.pieces, lockedBoard);
-  clearDynamicBoardCells();
-
-  result.placements.forEach(pl => {
-    const piece = state.pieces.find(p => p.id === pl.pieceId);
-    if (!piece) return;
-    piece.placed = { r: pl.r, c: pl.c };
-  });
-  renderBoardFromPlaced();
-  setStatus(`Solved lines=${result.score.lineCount}, color=${result.score.colorScore}${result.truncated ? ' (limit)' : ''}`);
-}
-
-function runHint() {
-  const lockedBoard = buildLockedBoard();
-  const fixedPlaced = state.pieces.filter(p => p.placed);
-  const remaining = state.pieces.filter(p => !p.placed);
-
-  let currentBoard = lockedBoard;
-  for (const piece of fixedPlaced) {
-    if (!canPlace(piece, piece.placed.r, piece.placed.c, false, null, currentBoard)) {
-      setStatus('Current manual placement has overlap / 重なりあり');
-      return;
-    }
-    currentBoard = placeOnBoard(currentBoard, piece, piece.placed);
-  }
-
-  const result = solveBest(remaining, currentBoard, 80000);
-  const first = result.placements[0];
-  if (!first) {
-    state.hint = null;
-    renderBoard(evaluateBoard(state.board).lines, []);
-    setStatus('No hint available / ヒントなし');
-    return;
-  }
-
-  const piece = state.pieces.find(p => p.id === first.pieceId);
-  const cells = getPieceCoords(piece).map(([dr, dc]) => [first.r + dr, first.c + dc]);
-  state.hint = { pieceId: first.pieceId, r: first.r, c: first.c, cells };
-  const score = evaluateBoard(state.board);
-  renderBoard(score.lines, cells);
-  setStatus(`Hint: place ${piece.shape} @ (${first.r},${first.c})`);
-}
-
-function applyHint() {
-  if (!state.hint) {
-    setStatus('No hint / ヒントなし');
-    return;
-  }
-  const piece = state.pieces.find(p => p.id === state.hint.pieceId);
-  if (!piece) return;
-  piece.placed = { r: state.hint.r, c: state.hint.c };
-  state.hint = null;
-  renderBoardFromPlaced();
-  setStatus('Hint applied / ヒント適用');
 }
 
 init();
