@@ -76,6 +76,81 @@ function initState() {
   }
 }
 
+// === 永続化 (localStorage) ===
+const STORAGE_KEY = 'unit-optimizer:v1';
+
+function saveState() {
+  try {
+    const snapshot = {
+      boardsUsed: state.boardsUsed,
+      mainBoard: state.mainBoard,
+      paintGrade: state.paintGrade,
+      manualGrade: state.manualGrade,
+      manualShape: state.manualShape,
+      boards: state.boards,
+      inventory: state.inventory,
+      solveResult: state.solveResult
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  } catch (e) {
+    // ストレージ不可 (プライベートモード等) はサイレントに無視
+  }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const snap = JSON.parse(raw);
+    if (!snap || typeof snap !== 'object') return;
+
+    if (snap.boardsUsed && typeof snap.boardsUsed === 'object') {
+      for (const k of BOARD_ORDER) {
+        if (typeof snap.boardsUsed[k] === 'boolean') state.boardsUsed[k] = snap.boardsUsed[k];
+      }
+    }
+    if (BOARD_ORDER.includes(snap.mainBoard)) state.mainBoard = snap.mainBoard;
+    if (gradeMap[snap.paintGrade])  state.paintGrade  = snap.paintGrade;
+    if (gradeMap[snap.manualGrade]) state.manualGrade = snap.manualGrade;
+    if (SHAPES.includes(snap.manualShape)) state.manualShape = snap.manualShape;
+
+    // 盤面: サイズが一致する時のみ採用 (仕様変更時の破損回避)
+    if (snap.boards && typeof snap.boards === 'object') {
+      for (const k of BOARD_ORDER) {
+        const meta = BOARDS[k];
+        const saved = snap.boards[k];
+        if (!saved || !Array.isArray(saved.cells) || !Array.isArray(saved.locked)) continue;
+        if (saved.cells.length !== meta.rows) continue;
+        if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
+        state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
+        state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
+      }
+    }
+
+    // 在庫
+    if (snap.inventory && typeof snap.inventory === 'object') {
+      for (const g of GRADES) {
+        const row = snap.inventory[g.key];
+        if (!row) continue;
+        for (const s of SHAPES) {
+          const n = Number(row[s]);
+          if (Number.isFinite(n) && n >= 0) state.inventory[g.key][s] = Math.floor(n);
+        }
+      }
+    }
+
+    // 未使用表示の復元
+    if (snap.solveResult && Array.isArray(snap.solveResult.unused)) {
+      state.solveResult = {
+        placements: Array.isArray(snap.solveResult.placements) ? snap.solveResult.placements : [],
+        unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
+      };
+    }
+  } catch (e) {
+    // パース失敗時はデフォルトのまま続行
+  }
+}
+
 // === DOM参照 ===
 const el = {};
 function cacheEls() {
@@ -97,6 +172,7 @@ function cacheEls() {
 function init() {
   cacheEls();
   initState();
+  loadState();
 
   // 塗る用品質セレクト
   for (const g of GRADES) {
@@ -106,7 +182,10 @@ function init() {
     el.paintGrade.append(opt);
   }
   el.paintGrade.value = state.paintGrade;
-  el.paintGrade.addEventListener('change', () => { state.paintGrade = el.paintGrade.value; });
+  el.paintGrade.addEventListener('change', () => {
+    state.paintGrade = el.paintGrade.value;
+    saveState();
+  });
 
   el.paintToggle.addEventListener('click', () => setPaintMode('paint'));
   el.eraseToggle.addEventListener('click', () => setPaintMode('erase'));
@@ -147,6 +226,7 @@ function renderBoardSelect() {
         state.mainBoard = BOARD_ORDER.find(k => state.boardsUsed[k]) || null;
       }
       if (useChk.checked && !state.mainBoard) state.mainBoard = key;
+      saveState();
       renderBoardSelect();
       renderBoards();
     });
@@ -162,6 +242,7 @@ function renderBoardSelect() {
     mainRadio.addEventListener('change', () => {
       if (!state.boardsUsed[key]) return;
       state.mainBoard = key;
+      saveState();
       renderBoardSelect();
       renderBoards();
     });
@@ -269,6 +350,7 @@ function onCellClick(boardKey, r, c) {
     bs.locked[r][c] = true;
   }
   state.solveResult = null;
+  saveState();
   renderBoards();
   renderUnused();
 }
@@ -308,7 +390,7 @@ function showManualPicker() {
     o.value = s; o.textContent = s; shapeSel.append(o);
   }
   shapeSel.value = state.manualShape;
-  shapeSel.addEventListener('change', () => { state.manualShape = shapeSel.value; });
+  shapeSel.addEventListener('change', () => { state.manualShape = shapeSel.value; saveState(); });
   shapeLbl.append(shapeSel);
 
   const gradeLbl = document.createElement('label');
@@ -319,7 +401,7 @@ function showManualPicker() {
     o.value = g.key; o.textContent = g.label; gradeSel.append(o);
   }
   gradeSel.value = state.manualGrade;
-  gradeSel.addEventListener('change', () => { state.manualGrade = gradeSel.value; });
+  gradeSel.addEventListener('change', () => { state.manualGrade = gradeSel.value; saveState(); });
   gradeLbl.append(gradeSel);
 
   const note = document.createElement('span');
@@ -346,6 +428,7 @@ function tryManualPlace(boardKey, r, c) {
         bs.locked[r + dr][c + dc] = true;
       }
       state.solveResult = null;
+      saveState();
       renderBoards();
       renderUnused();
       setStatus(`手動配置: ${shape}(${gradeMap[grade].label}) @ (${r},${c})`);
@@ -374,6 +457,7 @@ function resetBoards() {
     };
   }
   state.solveResult = null;
+  saveState();
   renderBoards();
   renderUnused();
   setStatus('盤面リセット完了');
@@ -422,6 +506,7 @@ function renderInventory() {
       input.addEventListener('input', () => {
         const v = Math.max(0, Math.floor(Number(input.value) || 0));
         state.inventory[g.key][s] = v;
+        saveState();
       });
       cell.append(input);
 
@@ -523,6 +608,7 @@ function runSolve() {
   const unused = pieces.filter(p => !used.has(p.id));
   state.solveResult = { placements, unused };
 
+  saveState();
   renderBoards();
   renderUnused();
 
