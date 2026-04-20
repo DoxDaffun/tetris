@@ -1,8 +1,8 @@
 // === 盤の種類 ===
 const BOARDS = {
-  segway:     { key: 'segway',     name: 'セグウェイ', rows: 8, cols: 7,  color: '#58a6ff' },
-  skateboard: { key: 'skateboard', name: 'スケボー',   rows: 8, cols: 9,  color: '#a77bff' },
-  horse:      { key: 'horse',      name: '馬',         rows: 8, cols: 12, color: '#ff6666' }
+  segway:     { key: 'segway',     name: 'セグウェイ', alias: 'Scooter', rows: 8, cols: 7,  color: '#58a6ff' },
+  skateboard: { key: 'skateboard', name: 'スケボー',   alias: 'Hover',   rows: 8, cols: 9,  color: '#a77bff' },
+  horse:      { key: 'horse',      name: '馬',         alias: 'Doom',    rows: 8, cols: 12, color: '#ff6666' }
 };
 const BOARD_ORDER = ['segway', 'skateboard', 'horse'];
 
@@ -213,7 +213,7 @@ function renderBoardSelect() {
 
     const title = document.createElement('div');
     title.className = 'board-opt-title';
-    title.textContent = `${b.name} (${b.rows}×${b.cols})`;
+    title.textContent = `${b.name} (${b.alias})`;
 
     const useLabel = document.createElement('label');
     useLabel.className = 'chk';
@@ -290,7 +290,7 @@ function renderOneBoard(key) {
   const title = document.createElement('div');
   title.className = 'board-title';
   const badge = state.mainBoard === key ? ' ★メイン' : '';
-  title.textContent = `${meta.name} (${meta.rows}×${meta.cols})${badge}`;
+  title.textContent = `${meta.name} (${meta.alias})${badge}`;
   wrap.append(title);
 
   const grid = document.createElement('div');
