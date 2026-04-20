@@ -3,60 +3,52 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Line Optimizer / ライン最適化</title>
+  <title>Unit Optimizer / ユニット最適化</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="app">
-    <header>
-      <h1>Line Optimizer / ライン最適化</h1>
-      <div class="mode-switch" role="group" aria-label="mode">
-        <button id="modeAuto" class="active">A Auto Solver / 自動</button>
-        <button id="modeManual">B Manual + Hint / 手動 + ヒント</button>
-      </div>
+    <header class="panel">
+      <h1>Unit Optimizer / ユニット最適化</h1>
+      <p class="hint-text">盤を選び、所持ユニットを入力して「最適化」を押してください。</p>
     </header>
 
-    <section class="panel board-panel">
-      <div class="toolbar">
-        <label for="paintColor">Preset 色</label>
-        <select id="paintColor"></select>
-        <button id="paintToggle" class="active">Paint / 塗る</button>
-        <button id="eraseToggle">Erase / 消す</button>
-        <button id="resetBoard">Reset Board / 盤面リセット</button>
-        <button id="resetAll">Reset All / 全リセット</button>
-      </div>
-
-      <div id="board" class="board" aria-label="board"></div>
-      <div id="lineSummary" class="line-summary">Lines: 0 / 8</div>
+    <section class="panel">
+      <h2>盤の選択 / Boards</h2>
+      <div id="boardSelect" class="board-select"></div>
     </section>
 
-    <section class="panel pieces-panel">
-      <div class="pieces-header">
-        <h2>Pieces / 手持ち</h2>
-        <button id="addPiece">+ Piece</button>
+    <section class="panel">
+      <div class="row-between">
+        <h2>盤面 / Boards</h2>
+        <div class="toolbar">
+          <label for="paintGrade" class="sr-label">品質</label>
+          <select id="paintGrade" class="paint-grade"></select>
+          <button id="paintToggle" class="active">塗る</button>
+          <button id="eraseToggle">消す</button>
+          <button id="manualToggle">手動配置</button>
+          <button id="resetBoard">盤面リセット</button>
+        </div>
       </div>
-      <div id="piecesList" class="pieces-list"></div>
+      <div id="boards" class="boards"></div>
+    </section>
+
+    <section class="panel">
+      <h2>所持ユニット / Units</h2>
+      <p class="hint-text">各ユニットの所持数を入力（品質 7 × 形状 5 = 35 項目）</p>
+      <div id="inventory" class="inventory"></div>
     </section>
 
     <section class="panel actions-panel">
-      <button id="solveBtn" class="primary">Solve / 最適化</button>
-      <button id="hintBtn">Hint / ヒント</button>
-      <button id="applyHintBtn">Apply Hint / ヒント適用</button>
-      <div id="status" class="status">Ready / 準備完了</div>
+      <button id="solveBtn" class="primary">最適化 / Solve</button>
+      <div id="status" class="status">準備完了</div>
+    </section>
+
+    <section class="panel" id="unusedPanel" hidden>
+      <h2>未使用ユニット / Unused</h2>
+      <div id="unusedList" class="unused-list"></div>
     </section>
   </main>
-
-  <template id="pieceRowTemplate">
-    <div class="piece-row" draggable="true">
-      <span class="drag">⠿</span>
-      <select class="shape"></select>
-      <select class="orientation"></select>
-      <select class="color"></select>
-      <button class="remove">✕</button>
-      <button class="rotate" title="Rotate / 回転">⟳</button>
-      <div class="mini-preview"></div>
-    </div>
-  </template>
 
   <script src="script.js"></script>
 </body>
