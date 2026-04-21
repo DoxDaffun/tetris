@@ -43,6 +43,7 @@ const state = {
   paintMode: 'paint',
   paintColor: 'red',
   board: Array.from({ length: ROWS }, () => Array(COLS).fill(null)),
+  pieceBoard: Array.from({ length: ROWS }, () => Array(COLS).fill(null)),
   locked: Array.from({ length: ROWS }, () => Array(COLS).fill(false)),
   pieces: [],
   hint: null,
@@ -131,7 +132,7 @@ function removePiece(id) {
   const idx = state.pieces.findIndex(p => p.id === id);
   if (idx >= 0) state.pieces.splice(idx, 1);
   renderPieces();
-  renderBoard();
+  renderBoardFromPlaced();
 }
 
 function getPieceCoords(piece) {
@@ -158,8 +159,21 @@ function renderBoard(lines = [], hintCells = []) {
     for (let c = 0; c < COLS; c++) {
       const div = document.createElement('div');
       div.className = 'cell';
+      const pid = state.pieceBoard[r][c];
       if (state.board[r][c]) {
         div.style.background = colorMap[state.board[r][c]].hex;
+        if (pid) {
+          const topPid = r > 0 ? state.pieceBoard[r - 1][c] : null;
+          const rightPid = c < COLS - 1 ? state.pieceBoard[r][c + 1] : null;
+          const bottomPid = r < ROWS - 1 ? state.pieceBoard[r + 1][c] : null;
+          const leftPid = c > 0 ? state.pieceBoard[r][c - 1] : null;
+          const edge = '2px solid rgba(255,255,255,0.8)';
+          const inner = '1px solid rgba(0,0,0,0.25)';
+          div.style.borderTop = topPid === pid ? inner : edge;
+          div.style.borderRight = rightPid === pid ? inner : edge;
+          div.style.borderBottom = bottomPid === pid ? inner : edge;
+          div.style.borderLeft = leftPid === pid ? inner : edge;
+        }
       }
       if (state.locked[r][c]) div.classList.add('prefilled');
       if (lineSet.has(r)) div.classList.add('line');
@@ -312,7 +326,10 @@ function rotatePiece(piece) {
 function clearDynamicBoardCells() {
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
-      if (!state.locked[r][c]) state.board[r][c] = null;
+      if (!state.locked[r][c]) {
+        state.board[r][c] = null;
+        state.pieceBoard[r][c] = null;
+      }
     }
   }
 }
@@ -324,7 +341,10 @@ function renderBoardFromPlaced() {
     for (const [dr, dc] of getPieceCoords(piece)) {
       const rr = piece.placed.r + dr;
       const cc = piece.placed.c + dc;
-      if (inside(rr, cc)) state.board[rr][cc] = piece.color;
+      if (inside(rr, cc)) {
+        state.board[rr][cc] = piece.color;
+        state.pieceBoard[rr][cc] = piece.id;
+      }
     }
   }
   const score = evaluateBoard(state.board);
@@ -387,6 +407,7 @@ function evaluateBoard(board) {
 
 function resetBoardOnly() {
   state.board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  state.pieceBoard = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
   state.locked = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
   state.pieces.forEach(p => (p.placed = null));
   state.hint = null;
