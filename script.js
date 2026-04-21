@@ -325,25 +325,25 @@ function renderOneBoard(key) {
       }
       if (bs.locked[r][c]) div.classList.add('prefilled');
 
-      // 形状ラベル
-      if (shape) {
-        const lbl = document.createElement('span');
-        lbl.className = 'cell-shape-label';
-        lbl.textContent = shape;
-        div.append(lbl);
-      }
-
-      // ピース境界インセットシャドウ + ライン完成シャドウを一括設定
+      // ピース輪郭インセットシャドウ + ライン完成シャドウを一括設定
       const shadows = [];
       if (lineSet.has(r)) shadows.push('inset 0 -3px 0 #ffffffaa');
-      if (pId) {
-        const adj = (nr, nc) =>
-          (nr >= 0 && nr < meta.rows && nc >= 0 && nc < meta.cols && bs.pieceIds)
-            ? (bs.pieceIds[nr][nc] ?? null) : null;
-        if (adj(r-1, c) !== pId) shadows.push('inset 0  2px 0 rgba(255,255,255,0.38)');
-        if (adj(r+1, c) !== pId) shadows.push('inset 0 -2px 0 rgba(255,255,255,0.38)');
-        if (adj(r, c-1) !== pId) shadows.push('inset  2px 0 0 rgba(255,255,255,0.38)');
-        if (adj(r, c+1) !== pId) shadows.push('inset -2px 0 0 rgba(255,255,255,0.38)');
+      if (grade) {
+        if (pId) {
+          const adj = (nr, nc) =>
+            (nr >= 0 && nr < meta.rows && nc >= 0 && nc < meta.cols && bs.pieceIds)
+              ? (bs.pieceIds[nr][nc] ?? null) : null;
+          if (adj(r-1, c) !== pId) shadows.push('inset 0  3px 0 rgba(255,255,255,0.9)');
+          if (adj(r+1, c) !== pId) shadows.push('inset 0 -3px 0 rgba(255,255,255,0.9)');
+          if (adj(r, c-1) !== pId) shadows.push('inset  3px 0 0 rgba(255,255,255,0.9)');
+          if (adj(r, c+1) !== pId) shadows.push('inset -3px 0 0 rgba(255,255,255,0.9)');
+        } else {
+          // ペイント塗りセル（pieceId無し）は4辺すべてに輪郭
+          shadows.push('inset 0  3px 0 rgba(255,255,255,0.9)');
+          shadows.push('inset 0 -3px 0 rgba(255,255,255,0.9)');
+          shadows.push('inset  3px 0 0 rgba(255,255,255,0.9)');
+          shadows.push('inset -3px 0 0 rgba(255,255,255,0.9)');
+        }
       }
       if (shadows.length) div.style.boxShadow = shadows.join(', ');
       else if (lineSet.has(r)) div.classList.add('line');
