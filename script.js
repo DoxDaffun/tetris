@@ -57,7 +57,7 @@ const state = {
   paintGrade: 'better',
   manualGrade: 'better',
   manualShape: 'T',
-  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]] }
+  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]], pieceIds: [[string|null]] }
   inventory: {},                 // gradeKey -> shapeKey -> count
   solveResult: null              // { placements, unused }
 };
@@ -67,7 +67,8 @@ function initState() {
     const { rows, cols } = BOARDS[key];
     state.boards[key] = {
       cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
-      locked: Array.from({ length: rows }, () => Array(cols).fill(false))
+      locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
+      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
     };
   }
   for (const g of GRADES) {
@@ -124,6 +125,15 @@ function loadState() {
         if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
         state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
         state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
+        if (
+          Array.isArray(saved.pieceIds) &&
+          saved.pieceIds.length === meta.rows &&
+          saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)
+        ) {
+          state.boards[k].pieceIds = saved.pieceIds.map(r => r.map(v => (typeof v === 'string' ? v : null)));
+        } else {
+          state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
+        }
       }
     }
 
@@ -299,7 +309,6 @@ function renderOneBoard(key) {
   grid.style.gridTemplateRows = `repeat(${meta.rows}, var(--cell))`;
 
   const lines = fullLinesOf(bs.cells);
-  const lineSet = new Set(lines);
 
   for (let r = 0; r < meta.rows; r++) {
     for (let c = 0; c < meta.cols; c++) {
@@ -311,8 +320,18 @@ function renderOneBoard(key) {
         div.style.background = g.hex;
         if (g.sparkle) div.classList.add('sparkle');
       }
+      const myPieceId = bs.pieceIds[r][c];
+      if (myPieceId) {
+        const edges = [];
+        const neighborDiffers = (rr, cc) =>
+          rr < 0 || rr >= meta.rows || cc < 0 || cc >= meta.cols || bs.pieceIds[rr][cc] !== myPieceId;
+        if (neighborDiffers(r - 1, c)) edges.push('inset 0 2px 0 0 #0008', 'inset 0 3px 0 0 #fff9');
+        if (neighborDiffers(r + 1, c)) edges.push('inset 0 -2px 0 0 #0008', 'inset 0 -3px 0 0 #fff9');
+        if (neighborDiffers(r, c - 1)) edges.push('inset 2px 0 0 0 #0008', 'inset 3px 0 0 0 #fff9');
+        if (neighborDiffers(r, c + 1)) edges.push('inset -2px 0 0 0 #0008', 'inset -3px 0 0 0 #fff9');
+        if (edges.length) div.style.boxShadow = edges.join(', ');
+      }
       if (bs.locked[r][c]) div.classList.add('prefilled');
-      if (lineSet.has(r)) div.classList.add('line');
       div.addEventListener('click', () => onCellClick(key, r, c));
       grid.append(div);
     }
@@ -345,9 +364,11 @@ function onCellClick(boardKey, r, c) {
   if (state.paintMode === 'erase') {
     bs.cells[r][c] = null;
     bs.locked[r][c] = false;
+    bs.pieceIds[r][c] = null;
   } else {
     bs.cells[r][c] = state.paintGrade;
     bs.locked[r][c] = true;
+    bs.pieceIds[r][c] = null;
   }
   state.solveResult = null;
   saveState();
@@ -420,12 +441,14 @@ function tryManualPlace(boardKey, r, c) {
   const meta = BOARDS[boardKey];
   const shape = state.manualShape;
   const grade = state.manualGrade;
+  const pieceId = `manual_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   // 全向きを試し、最初にフィットするものを採用
   for (const orient of SHAPE_ORIENTATIONS[shape]) {
     if (fitsAt(bs.cells, orient, r, c, meta)) {
       for (const [dr, dc] of orient) {
         bs.cells[r + dr][c + dc] = grade;
         bs.locked[r + dr][c + dc] = true;
+        bs.pieceIds[r + dr][c + dc] = pieceId;
       }
       state.solveResult = null;
       saveState();
@@ -453,7 +476,8 @@ function resetBoards() {
     const { rows, cols } = BOARDS[key];
     state.boards[key] = {
       cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
-      locked: Array.from({ length: rows }, () => Array(cols).fill(false))
+      locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
+      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
     };
   }
   state.solveResult = null;
@@ -588,6 +612,7 @@ function runSolve() {
     for (let r = 0; r < boardStates[k].meta.rows; r++) {
       for (let c = 0; c < boardStates[k].meta.cols; c++) {
         if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
+        if (!state.boards[k].locked[r][c]) state.boards[k].pieceIds[r][c] = null;
       }
     }
   }
@@ -604,6 +629,10 @@ function runSolve() {
   for (const k of keys) {
     state.boards[k].cells = boardStates[k].cells;
     // locked は変更しない (ユーザー指定のみ locked)
+  }
+  for (const p of placements) {
+    const bs = state.boards[p.boardKey];
+    for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
   }
   const unused = pieces.filter(p => !used.has(p.id));
   state.solveResult = { placements, unused };
