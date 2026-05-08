@@ -78,6 +78,38 @@ button.active { border-color: var(--accent); color: var(--accent); }
   align-items: center;
 }
 
+
+/* ========== Mode tabs ========== */
+.mode-panel {
+  padding: 8px 10px;
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mode-tab {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mode-tab.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, #242a44);
+}
+
+.mode-rename {
+  padding: 4px 6px;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
 /* ========== Board selection ========== */
 .board-select {
   display: flex;
@@ -343,8 +375,45 @@ button.active { border-color: var(--accent); color: var(--accent); }
   :root { --cell: 26px; }
   .app { padding: 6px 5px 30px; }
   .board-opt { min-width: 90px; }
+  .mode-tab { max-width: 110px; font-size: 0.78rem; }
   .inv-row-head { min-width: 70px; font-size: 0.62rem; }
   .inv-cell { min-width: 36px; }
   .inv-cell input[type="number"] { width: 34px; font-size: 0.75rem; }
   .primary { width: 100%; text-align: center; }
+}
+
+/* ========== Effect memo overlay / picker ========== */
+.cell-note {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  z-index: 3;
+  color: #fff;
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  text-shadow:
+    -1px -1px 0 #000,
+     1px -1px 0 #000,
+    -1px  1px 0 #000,
+     1px  1px 0 #000,
+     0 1px 3px rgba(0,0,0,0.9);
+  pointer-events: none;
+}
+
+.memo-picker {
+  position: absolute;
+  z-index: 10;
+  max-width: min(260px, calc(100vw - 12px));
+  padding: 8px;
+  background: #11172b;
+  border: 1px solid #334;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+
+.memo-picker select {
+  width: 100%;
+  max-width: 244px;
 }
