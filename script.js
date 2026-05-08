@@ -4,7 +4,7 @@ const BOARDS = {
   skateboard: { key: 'skateboard', name: 'スケボー',   alias: 'Hover',   rows: 8, cols: 9,  color: '#a77bff' },
   horse:      { key: 'horse',      name: '馬',         alias: 'Doom',    rows: 8, cols: 12, color: '#ff6666' }
 };
-const BOARD_ORDER = ['segway', 'skateboard', 'horse'];
+const BOARD_ORDER = ['horse', 'skateboard', 'segway'];
 
 // === 品質 (grade) ===
 // 紫 (excellent) は旧キラ紫の色を、金 (epic) は旧キラ橙の色を流用。
@@ -19,6 +19,20 @@ const GRADES = [
   { key: 'legend',        label: '赤 (legend)',      hex: '#ff6666', priority: 7, sparkle: false }
 ];
 const gradeMap = Object.fromEntries(GRADES.map(g => [g.key, g]));
+const GRADES_DESC_PRIORITY = GRADES.slice().sort((a, b) => b.priority - a.priority);
+
+// === 効果メモ ===
+const EFFECTS = [
+  { key: 'Cr', labelJa: 'クリティカルダメージ', labelEn: 'Critical damage' },
+  { key: 'Sk', labelJa: 'スキルダメージ', labelEn: 'Skill damage' },
+  { key: 'Sh', labelJa: 'シールドダメージ', labelEn: 'Shield damage' },
+  { key: 'P',  labelJa: '毒', labelEn: 'Poisoned' },
+  { key: 'W',  labelJa: '衰弱', labelEn: 'Weakened' },
+  { key: 'Ch', labelJa: '氷結', labelEn: 'Chilled' },
+  { key: 'L',  labelJa: '裂傷', labelEn: 'Lacerated' },
+  { key: 'B',  labelJa: 'ボスダメージ', labelEn: 'Boss damage' }
+];
+const EFFECT_KEYS = new Set(EFFECTS.map(e => e.key));
 
 // === 形状 ===
 const SHAPES = ['O', 'I', 'T', 'L', 'J'];
@@ -54,21 +68,35 @@ const state = {
   mainBoard: 'segway',
   paintMode: 'paint',            // 'paint' | 'erase'
   manualPlacement: false,
+  memoMode: false,
   paintGrade: 'better',
   manualGrade: 'better',
   manualShape: 'T',
-  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]], pieceIds: [[string|null]] }
+  boards: {},                    // boardKey -> { cells, locked, pieceIds, pieceNotes }
   inventory: {},                 // gradeKey -> shapeKey -> count
   solveResult: null              // { placements, unused }
 };
 
 function initState() {
+  state.boardsUsed = { segway: true, skateboard: false, horse: false };
+  state.mainBoard = 'segway';
+  state.paintMode = 'paint';
+  state.manualPlacement = false;
+  state.memoMode = false;
+  state.paintGrade = 'better';
+  state.manualGrade = 'better';
+  state.manualShape = 'T';
+  state.boards = {};
+  state.inventory = {};
+  state.solveResult = null;
+
   for (const key of BOARD_ORDER) {
     const { rows, cols } = BOARDS[key];
     state.boards[key] = {
       cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
       locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
-      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
+      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      pieceNotes: {}
     };
   }
   for (const g of GRADES) {
@@ -79,97 +107,173 @@ function initState() {
 
 // === 永続化 (localStorage) ===
 const STORAGE_KEY = 'unit-optimizer:v1';
+const MODES_STORAGE_KEY = 'unit-optimizer:v2';
+const DEFAULT_MODE_NAMES = ['Mode A', 'Mode B', 'Mode C'];
+const MODE_COUNT = 3;
 
-function saveState() {
-  try {
-    const snapshot = {
-      boardsUsed: state.boardsUsed,
-      mainBoard: state.mainBoard,
-      paintGrade: state.paintGrade,
-      manualGrade: state.manualGrade,
-      manualShape: state.manualShape,
-      boards: state.boards,
-      inventory: state.inventory,
-      solveResult: state.solveResult
+let modeStore = createDefaultModeStore();
+
+function createDefaultModeStore() {
+  return {
+    activeMode: 0,
+    modes: DEFAULT_MODE_NAMES.map(name => ({ name, snapshot: {} }))
+  };
+}
+
+function serializeStateSnapshot() {
+  return {
+    boardsUsed: state.boardsUsed,
+    mainBoard: state.mainBoard,
+    paintGrade: state.paintGrade,
+    paintMode: state.paintMode,
+    manualGrade: state.manualGrade,
+    manualShape: state.manualShape,
+    boards: state.boards,
+    inventory: state.inventory,
+    solveResult: state.solveResult
+  };
+}
+
+function applySnapshotToState(snap) {
+  if (!snap || typeof snap !== 'object') return;
+
+  if (snap.boardsUsed && typeof snap.boardsUsed === 'object') {
+    for (const k of BOARD_ORDER) {
+      if (typeof snap.boardsUsed[k] === 'boolean') state.boardsUsed[k] = snap.boardsUsed[k];
+    }
+  }
+  if (BOARD_ORDER.includes(snap.mainBoard)) state.mainBoard = snap.mainBoard;
+  if (gradeMap[snap.paintGrade])  state.paintGrade  = snap.paintGrade;
+  if (['paint', 'erase'].includes(snap.paintMode)) state.paintMode = snap.paintMode;
+  if (gradeMap[snap.manualGrade]) state.manualGrade = snap.manualGrade;
+  if (SHAPES.includes(snap.manualShape)) state.manualShape = snap.manualShape;
+
+  // 盤面: サイズが一致する時のみ採用 (仕様変更時の破損回避)
+  if (snap.boards && typeof snap.boards === 'object') {
+    for (const k of BOARD_ORDER) {
+      const meta = BOARDS[k];
+      const saved = snap.boards[k];
+      if (!saved || !Array.isArray(saved.cells) || !Array.isArray(saved.locked)) continue;
+      if (saved.cells.length !== meta.rows) continue;
+      if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
+      state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
+      state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
+      if (
+        Array.isArray(saved.pieceIds) &&
+        saved.pieceIds.length === meta.rows &&
+        saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)
+      ) {
+        state.boards[k].pieceIds = saved.pieceIds.map(r => r.map(v => (typeof v === 'string' ? v : null)));
+      } else {
+        state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
+      }
+      state.boards[k].pieceNotes = sanitizePieceNotes(saved.pieceNotes);
+      pruneOrphanNotes(state.boards[k]);
+    }
+  }
+
+  // 在庫
+  if (snap.inventory && typeof snap.inventory === 'object') {
+    for (const g of GRADES) {
+      const row = snap.inventory[g.key];
+      if (!row) continue;
+      for (const s of SHAPES) {
+        const n = Number(row[s]);
+        if (Number.isFinite(n) && n >= 0) state.inventory[g.key][s] = Math.floor(n);
+      }
+    }
+  }
+
+  // 未使用表示の復元
+  if (snap.solveResult && Array.isArray(snap.solveResult.unused)) {
+    state.solveResult = {
+      placements: Array.isArray(snap.solveResult.placements) ? snap.solveResult.placements : [],
+      unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  }
+}
+
+function sanitizePieceNotes(pieceNotes) {
+  const clean = {};
+  if (!pieceNotes || typeof pieceNotes !== 'object' || Array.isArray(pieceNotes)) return clean;
+  for (const [pieceId, effectKey] of Object.entries(pieceNotes)) {
+    if (typeof pieceId === 'string' && EFFECT_KEYS.has(effectKey)) clean[pieceId] = effectKey;
+  }
+  return clean;
+}
+
+function normalizeModeStore(rawStore) {
+  const defaults = createDefaultModeStore();
+  const normalized = createDefaultModeStore();
+  const source = rawStore && typeof rawStore === 'object' ? rawStore : {};
+  const sourceModes = Array.isArray(source.modes) ? source.modes : [];
+
+  for (let i = 0; i < MODE_COUNT; i++) {
+    const mode = sourceModes[i] && typeof sourceModes[i] === 'object' ? sourceModes[i] : {};
+    const name = typeof mode.name === 'string' ? mode.name.trim() : '';
+    normalized.modes[i] = {
+      name: name || defaults.modes[i].name,
+      snapshot: mode.snapshot && typeof mode.snapshot === 'object' ? mode.snapshot : {}
+    };
+  }
+
+  const active = Number(source.activeMode);
+  normalized.activeMode = Number.isInteger(active) && active >= 0 && active < MODE_COUNT ? active : 0;
+  return normalized;
+}
+
+function persistModeStore() {
+  try {
+    localStorage.setItem(MODES_STORAGE_KEY, JSON.stringify(modeStore));
   } catch (e) {
     // ストレージ不可 (プライベートモード等) はサイレントに無視
   }
 }
 
-function loadState() {
+function loadModeStore() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const snap = JSON.parse(raw);
-    if (!snap || typeof snap !== 'object') return;
-
-    if (snap.boardsUsed && typeof snap.boardsUsed === 'object') {
-      for (const k of BOARD_ORDER) {
-        if (typeof snap.boardsUsed[k] === 'boolean') state.boardsUsed[k] = snap.boardsUsed[k];
-      }
-    }
-    if (BOARD_ORDER.includes(snap.mainBoard)) state.mainBoard = snap.mainBoard;
-    if (gradeMap[snap.paintGrade])  state.paintGrade  = snap.paintGrade;
-    if (gradeMap[snap.manualGrade]) state.manualGrade = snap.manualGrade;
-    if (SHAPES.includes(snap.manualShape)) state.manualShape = snap.manualShape;
-
-    // 盤面: サイズが一致する時のみ採用 (仕様変更時の破損回避)
-    if (snap.boards && typeof snap.boards === 'object') {
-      for (const k of BOARD_ORDER) {
-        const meta = BOARDS[k];
-        const saved = snap.boards[k];
-        if (!saved || !Array.isArray(saved.cells) || !Array.isArray(saved.locked)) continue;
-        if (saved.cells.length !== meta.rows) continue;
-        if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
-        state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
-        state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
-        if (
-          Array.isArray(saved.pieceIds) &&
-          saved.pieceIds.length === meta.rows &&
-          saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)
-        ) {
-          state.boards[k].pieceIds = saved.pieceIds.map(r => r.map(v => (typeof v === 'string' ? v : null)));
-        } else {
-          state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
-        }
-      }
+    const rawV2 = localStorage.getItem(MODES_STORAGE_KEY);
+    if (rawV2) {
+      modeStore = normalizeModeStore(JSON.parse(rawV2));
+      return;
     }
 
-    // 在庫
-    if (snap.inventory && typeof snap.inventory === 'object') {
-      for (const g of GRADES) {
-        const row = snap.inventory[g.key];
-        if (!row) continue;
-        for (const s of SHAPES) {
-          const n = Number(row[s]);
-          if (Number.isFinite(n) && n >= 0) state.inventory[g.key][s] = Math.floor(n);
-        }
-      }
-    }
-
-    // 未使用表示の復元
-    if (snap.solveResult && Array.isArray(snap.solveResult.unused)) {
-      state.solveResult = {
-        placements: Array.isArray(snap.solveResult.placements) ? snap.solveResult.placements : [],
-        unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
-      };
+    const rawV1 = localStorage.getItem(STORAGE_KEY);
+    if (rawV1) {
+      const migrated = createDefaultModeStore();
+      const snap = JSON.parse(rawV1);
+      migrated.modes[0].snapshot = snap && typeof snap === 'object' ? snap : {};
+      modeStore = normalizeModeStore(migrated);
+      persistModeStore();
+      return;
     }
   } catch (e) {
     // パース失敗時はデフォルトのまま続行
   }
+  modeStore = createDefaultModeStore();
+}
+
+function saveState() {
+  modeStore.modes[modeStore.activeMode].snapshot = serializeStateSnapshot();
+  persistModeStore();
+}
+
+function loadState() {
+  loadModeStore();
+  applySnapshotToState(modeStore.modes[modeStore.activeMode].snapshot);
 }
 
 // === DOM参照 ===
 const el = {};
 function cacheEls() {
+  el.modeTabs = document.getElementById('modeTabs');
   el.boardSelect = document.getElementById('boardSelect');
   el.boards = document.getElementById('boards');
   el.paintGrade = document.getElementById('paintGrade');
   el.paintToggle = document.getElementById('paintToggle');
   el.eraseToggle = document.getElementById('eraseToggle');
   el.manualToggle = document.getElementById('manualToggle');
+  el.memoToggle = document.getElementById('memoToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
   el.status = document.getElementById('status');
@@ -200,13 +304,84 @@ function init() {
   el.paintToggle.addEventListener('click', () => setPaintMode('paint'));
   el.eraseToggle.addEventListener('click', () => setPaintMode('erase'));
   el.manualToggle.addEventListener('click', () => toggleManual());
+  el.memoToggle.addEventListener('click', () => toggleMemo());
   el.resetBoard.addEventListener('click', resetBoards);
   el.solveBtn.addEventListener('click', runSolve);
 
+  renderModeTabs();
   renderBoardSelect();
   renderBoards();
   renderInventory();
   renderUnused();
+}
+
+// === モードタブ UI ===
+function renderModeTabs() {
+  el.modeTabs.innerHTML = '';
+  modeStore.modes.forEach((mode, idx) => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = 'mode-tab';
+    tab.dataset.idx = String(idx);
+    tab.textContent = mode.name;
+    tab.title = mode.name;
+    if (idx === modeStore.activeMode) {
+      tab.classList.add('active');
+      tab.setAttribute('aria-current', 'page');
+    }
+    tab.addEventListener('click', () => switchMode(idx));
+    el.modeTabs.append(tab);
+
+    if (idx === modeStore.activeMode) {
+      const rename = document.createElement('button');
+      rename.type = 'button';
+      rename.className = 'mode-rename';
+      rename.setAttribute('aria-label', 'rename');
+      rename.title = 'モード名を変更';
+      rename.textContent = '✎';
+      rename.addEventListener('click', () => renameMode(idx));
+      el.modeTabs.append(rename);
+    }
+  });
+}
+
+function switchMode(idx) {
+  if (!Number.isInteger(idx) || idx < 0 || idx >= MODE_COUNT || idx === modeStore.activeMode) return;
+
+  saveState();
+  modeStore.activeMode = idx;
+  persistModeStore();
+
+  hideManualPicker();
+  hideMemoPicker();
+  initState();
+  applySnapshotToState(modeStore.modes[idx].snapshot);
+  syncControlsToState();
+  renderModeTabs();
+  renderBoardSelect();
+  renderBoards();
+  renderInventory();
+  renderUnused();
+  setStatus(`${modeStore.modes[idx].name} に切り替えました`);
+}
+
+function renameMode(idx) {
+  if (!Number.isInteger(idx) || idx < 0 || idx >= MODE_COUNT) return;
+  const current = modeStore.modes[idx].name;
+  const input = prompt('モード名を入力', current);
+  if (input === null) return;
+  const trimmed = input.trim();
+  modeStore.modes[idx].name = trimmed && trimmed.length <= 15 ? trimmed : DEFAULT_MODE_NAMES[idx];
+  persistModeStore();
+  renderModeTabs();
+}
+
+function syncControlsToState() {
+  el.paintGrade.value = state.paintGrade;
+  el.paintToggle.classList.toggle('active', state.paintMode === 'paint' && !state.memoMode);
+  el.eraseToggle.classList.toggle('active', state.paintMode === 'erase' && !state.memoMode);
+  el.manualToggle.classList.toggle('active', state.manualPlacement);
+  el.memoToggle.classList.toggle('active', state.memoMode);
 }
 
 // === 盤選択 UI ===
@@ -309,6 +484,7 @@ function renderOneBoard(key) {
   grid.style.gridTemplateRows = `repeat(${meta.rows}, var(--cell))`;
 
   const lines = fullLinesOf(bs.cells);
+  const anchors = computePieceAnchors(bs.pieceIds, meta);
 
   for (let r = 0; r < meta.rows; r++) {
     for (let c = 0; c < meta.cols; c++) {
@@ -331,8 +507,17 @@ function renderOneBoard(key) {
         if (neighborDiffers(r, c + 1)) edges.push('inset -2px 0 0 0 #0008', 'inset -3px 0 0 0 #fff9');
         if (edges.length) div.style.boxShadow = edges.join(', ');
       }
+      if (myPieceId && anchors[myPieceId]?.r === r && anchors[myPieceId]?.c === c) {
+        const noteKey = bs.pieceNotes?.[myPieceId];
+        if (EFFECT_KEYS.has(noteKey)) {
+          const note = document.createElement('span');
+          note.className = 'cell-note';
+          note.textContent = noteKey;
+          div.append(note);
+        }
+      }
       if (bs.locked[r][c]) div.classList.add('prefilled');
-      div.addEventListener('click', () => onCellClick(key, r, c));
+      div.addEventListener('click', () => onCellClick(key, r, c, div));
       grid.append(div);
     }
   }
@@ -346,21 +531,38 @@ function renderOneBoard(key) {
   el.boards.append(wrap);
 }
 
+function computePieceAnchors(pieceIds, meta) {
+  const anchors = {};
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      const pieceId = pieceIds[r][c];
+      if (pieceId && !anchors[pieceId]) anchors[pieceId] = { r, c };
+    }
+  }
+  return anchors;
+}
+
 function fullLinesOf(cells) {
   const lines = [];
   for (let r = 0; r < cells.length; r++) {
-    if (cells[r].every(Boolean)) lines.push(r);
+    if (cells[r].every(isRealCell)) lines.push(r);
   }
   return lines;
 }
 
 // === クリック ===
-function onCellClick(boardKey, r, c) {
+function onCellClick(boardKey, r, c, cellEl) {
+  if (state.memoMode) {
+    tryEditPieceMemo(boardKey, r, c, cellEl);
+    return;
+  }
   if (state.manualPlacement) {
     tryManualPlace(boardKey, r, c);
     return;
   }
   const bs = state.boards[boardKey];
+  const oldPieceId = bs.pieceIds[r][c];
+  if (oldPieceId && bs.pieceNotes) delete bs.pieceNotes[oldPieceId];
   if (state.paintMode === 'erase') {
     bs.cells[r][c] = null;
     bs.locked[r][c] = false;
@@ -370,6 +572,7 @@ function onCellClick(boardKey, r, c) {
     bs.locked[r][c] = true;
     bs.pieceIds[r][c] = null;
   }
+  pruneOrphanNotes(bs);
   state.solveResult = null;
   saveState();
   renderBoards();
@@ -378,21 +581,46 @@ function onCellClick(boardKey, r, c) {
 
 // === モード切り替え ===
 function setPaintMode(mode) {
+  if (state.memoMode) toggleMemo(false);
   state.paintMode = mode;
   el.paintToggle.classList.toggle('active', mode === 'paint');
   el.eraseToggle.classList.toggle('active', mode === 'erase');
   if (state.manualPlacement) toggleManual(); // 強制的にOFF
+  saveState();
 }
 
-function toggleManual() {
-  state.manualPlacement = !state.manualPlacement;
+function toggleManual(force) {
+  if (state.memoMode) toggleMemo(false);
+  state.manualPlacement = typeof force === 'boolean' ? force : !state.manualPlacement;
   el.manualToggle.classList.toggle('active', state.manualPlacement);
   if (state.manualPlacement) {
+    el.paintToggle.classList.remove('active');
+    el.eraseToggle.classList.remove('active');
     showManualPicker();
     setStatus('手動配置モード: 形状と品質を選択してから盤面をクリック');
   } else {
+    syncControlsToState();
     hideManualPicker();
     setStatus('手動配置モード OFF');
+  }
+}
+
+function toggleMemo(force) {
+  state.memoMode = typeof force === 'boolean' ? force : !state.memoMode;
+  el.memoToggle.classList.toggle('active', state.memoMode);
+  if (state.memoMode) {
+    if (state.manualPlacement) {
+      state.manualPlacement = false;
+      el.manualToggle.classList.remove('active');
+    }
+    el.paintToggle.classList.remove('active');
+    el.eraseToggle.classList.remove('active');
+    hideManualPicker();
+    setStatus('メモモード: 配置済みピースをクリックして効果メモを設定');
+  } else {
+    hideMemoPicker();
+    syncControlsToState();
+    setStatus('メモモード OFF');
   }
 }
 
@@ -436,6 +664,74 @@ function hideManualPicker() {
   if (manualPicker) { manualPicker.remove(); manualPicker = null; }
 }
 
+// === 効果メモのピッカー ===
+let memoPicker = null;
+function tryEditPieceMemo(boardKey, r, c, cellEl) {
+  const bs = state.boards[boardKey];
+  const pieceId = bs.pieceIds[r][c];
+  if (!pieceId) {
+    hideMemoPicker();
+    setStatus('メモ対象のピースがありません');
+    return;
+  }
+  showMemoPicker(boardKey, pieceId, cellEl);
+}
+
+function showMemoPicker(boardKey, pieceId, cellEl) {
+  hideMemoPicker();
+  const bs = state.boards[boardKey];
+  memoPicker = document.createElement('div');
+  memoPicker.className = 'memo-picker';
+
+  const select = document.createElement('select');
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = '– / なし';
+  select.append(emptyOpt);
+  for (const effect of EFFECTS) {
+    const opt = document.createElement('option');
+    opt.value = effect.key;
+    opt.textContent = `${effect.labelJa} / ${effect.labelEn}`;
+    select.append(opt);
+  }
+  select.value = bs.pieceNotes?.[pieceId] || '';
+  select.addEventListener('click', ev => ev.stopPropagation());
+  select.addEventListener('change', () => {
+    if (!bs.pieceNotes) bs.pieceNotes = {};
+    if (EFFECT_KEYS.has(select.value)) bs.pieceNotes[pieceId] = select.value;
+    else delete bs.pieceNotes[pieceId];
+    saveState();
+    renderBoards();
+    hideMemoPicker();
+    setStatus(select.value ? '効果メモを設定しました' : '効果メモを削除しました');
+  });
+  memoPicker.append(select);
+  memoPicker.addEventListener('click', ev => ev.stopPropagation());
+
+  const rect = cellEl.getBoundingClientRect();
+  const left = Math.max(window.scrollX + 6, Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 266));
+  memoPicker.style.left = `${left}px`;
+  memoPicker.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  document.body.append(memoPicker);
+  select.focus();
+
+  setTimeout(() => {
+    document.addEventListener('click', onMemoOutsideClick, { capture: true });
+  }, 0);
+}
+
+function onMemoOutsideClick(ev) {
+  if (memoPicker && !memoPicker.contains(ev.target)) hideMemoPicker();
+}
+
+function hideMemoPicker() {
+  if (memoPicker) {
+    memoPicker.remove();
+    memoPicker = null;
+  }
+  document.removeEventListener('click', onMemoOutsideClick, { capture: true });
+}
+
 function tryManualPlace(boardKey, r, c) {
   const bs = state.boards[boardKey];
   const meta = BOARDS[boardKey];
@@ -477,7 +773,8 @@ function resetBoards() {
     state.boards[key] = {
       cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
       locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
-      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
+      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      pieceNotes: {}
     };
   }
   state.solveResult = null;
@@ -573,29 +870,28 @@ function drawMiniShape(container, shape, grade) {
 
 // === ソルバー ===
 function runSolve() {
+  const solveOpts = { _anyTimedOut: false };
   const keys = selectedBoardKeys();
   if (keys.length === 0) {
     setStatus('使用する盤を選択してください');
     return;
   }
 
-  // インベントリを「ピースインスタンス」群へ展開。品質の高い順＋サイズの大きい順で並べる。
-  const pieces = [];
+  // DFS 中に同種ユニットを O(1) で消費/復元できるよう grade × shape の残数で持つ。
+  const invByGrade = {};
   for (const g of GRADES) {
+    invByGrade[g.key] = Object.fromEntries(SHAPES.map(s => [s, state.inventory[g.key][s] | 0]));
+  }
+
+  // 採用配置から具体的な pieceId を復元するための ID プール。
+  const pieceIdPool = {};
+  for (const g of GRADES) {
+    pieceIdPool[g.key] = {};
     for (const s of SHAPES) {
-      const n = state.inventory[g.key][s] | 0;
-      for (let i = 0; i < n; i++) {
-        pieces.push({ id: `${g.key}_${s}_${i}`, shape: s, grade: g.key });
-      }
+      const n = invByGrade[g.key][s];
+      pieceIdPool[g.key][s] = Array.from({ length: n }, (_, i) => `${g.key}_${s}_${i}`);
     }
   }
-  pieces.sort((a, b) => {
-    const pg = gradeMap[b.grade].priority - gradeMap[a.grade].priority;
-    if (pg !== 0) return pg;
-    const szA = SHAPE_ORIENTATIONS[a.shape][0].length;
-    const szB = SHAPE_ORIENTATIONS[b.shape][0].length;
-    return szB - szA;
-  });
 
   // 盤ごとに固定(locked)と既存配置の状態をコピー
   const boardStates = {};
@@ -609,20 +905,35 @@ function runSolve() {
 
   // 既存の非ロックセルはソルバー用にクリア(前回の配置を消す)
   for (const k of keys) {
+    keepNotesForLockedPieces(state.boards[k]);
     for (let r = 0; r < boardStates[k].meta.rows; r++) {
       for (let c = 0; c < boardStates[k].meta.cols; c++) {
         if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
         if (!state.boards[k].locked[r][c]) state.boards[k].pieceIds[r][c] = null;
       }
     }
+    pruneOrphanNotes(state.boards[k]);
   }
 
   const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
-  const used = new Set();
 
-  // 盤の優先順: selectedBoardKeys() がメインを先頭にする
+  // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
   for (const k of keys) {
-    fillBoardGreedy(boardStates[k], pieces, used, placements, k);
+    const boardOpts = {
+      deadline: performance.now() + 500,
+      timedOut: false
+    };
+    const result = solveBoard(boardStates[k], invByGrade, boardOpts);
+    boardStates[k].cells = result.cellsSnapshot ?? boardStates[k].cells;
+
+    // DFS 中の消費は探索復帰時に戻るため、採用配置だけここで実消費する。
+    for (const p of result.placements) {
+      invByGrade[p.grade][p.shape]--;
+      const pid = pieceIdPool[p.grade][p.shape].pop();
+      const cells = p.orient.map(([dr, dc]) => [p.baseR + dr, p.baseC + dc]);
+      placements.push({ boardKey: k, pieceId: pid, grade: p.grade, cells });
+    }
+    if (boardOpts.timedOut) solveOpts._anyTimedOut = true;
   }
 
   // 反映
@@ -634,78 +945,224 @@ function runSolve() {
     const bs = state.boards[p.boardKey];
     for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
   }
-  const unused = pieces.filter(p => !used.has(p.id));
+
+  const unused = [];
+  for (const g of GRADES) {
+    for (const s of SHAPES) {
+      for (const id of pieceIdPool[g.key][s]) unused.push({ id, grade: g.key, shape: s });
+    }
+  }
   state.solveResult = { placements, unused };
 
   saveState();
   renderBoards();
   renderUnused();
 
-  let msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
+  const msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
   const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
-  setStatus(`${msg} | ラインs ${lineSummary}`);
+  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示しています' : '';
+  setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
 }
 
-// 1盤を貪欲+ライトなローカル探索で埋める。
-// 方針: 残っている位置のうち最も「左上」のセルを起点に、そのセルを埋められるユニットを
-// 現状の評価値が最大になるように選ぶ。評価値はライン完成重視＋品質スコア。
-function fillBoardGreedy(boardState, pieces, used, placements, boardKey) {
-  const { meta } = boardState;
-  while (true) {
-    const empty = findTopLeftEmpty(boardState.cells, meta);
-    if (!empty) break;
+function collectPieceIds(bs, onlyLocked = false) {
+  const ids = new Set();
+  for (let r = 0; r < bs.pieceIds.length; r++) {
+    for (let c = 0; c < bs.pieceIds[r].length; c++) {
+      if ((!onlyLocked || bs.locked[r][c]) && bs.pieceIds[r][c]) ids.add(bs.pieceIds[r][c]);
+    }
+  }
+  return ids;
+}
 
-    let best = null;
-    for (const piece of pieces) {
-      if (used.has(piece.id)) continue;
-      for (const orient of SHAPE_ORIENTATIONS[piece.shape]) {
-        for (const [dr, dc] of orient) {
-          const baseR = empty.r - dr;
-          const baseC = empty.c - dc;
-          if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
-          const score = scorePlacement(boardState.cells, orient, baseR, baseC, meta, piece);
-          if (!best || score > best.score) {
-            best = { score, piece, orient, baseR, baseC };
+function keepNotesForLockedPieces(bs) {
+  const lockedIds = collectPieceIds(bs, true);
+  filterPieceNotes(bs, lockedIds);
+}
+
+function pruneOrphanNotes(bs) {
+  filterPieceNotes(bs, collectPieceIds(bs));
+}
+
+function filterPieceNotes(bs, validIds) {
+  const notes = sanitizePieceNotes(bs.pieceNotes);
+  for (const pieceId of Object.keys(notes)) {
+    if (!validIds.has(pieceId)) delete notes[pieceId];
+  }
+  bs.pieceNotes = notes;
+}
+
+function solveBoard(boardState, invByGrade, opts) {
+  const { meta } = boardState;
+  const deadline = opts.deadline;
+  let best = { score: [-1, -1, -Infinity, -Infinity], cellsSnapshot: null, placements: [] };
+  const currentPlacements = [];
+  let curQualitySum = 0;
+
+  function considerCurrent() {
+    const sc = scoreSnapshot(boardState.cells, curQualitySum);
+    if (compareScores(sc, best.score) > 0) {
+      best = {
+        score: sc,
+        cellsSnapshot: snapshotCells(boardState.cells),
+        placements: currentPlacements.map(p => ({ ...p }))
+      };
+    }
+  }
+
+  function dfs() {
+    considerCurrent();
+    if (deadline && performance.now() > deadline) {
+      opts.timedOut = true;
+      return;
+    }
+
+    const ub = upperBound(boardState, invByGrade, curQualitySum);
+    if (compareScores(ub, best.score) <= 0) return;
+
+    const empty = findNextEmpty(boardState.cells, meta, invByGrade);
+    if (!empty) return;
+
+    for (const g of GRADES_DESC_PRIORITY) {
+      for (const s of SHAPES) {
+        if (invByGrade[g.key][s] === 0) continue;
+        for (const orient of SHAPE_ORIENTATIONS[s]) {
+          for (let i = 0; i < orient.length; i++) {
+            const [dr, dc] = orient[i];
+            const baseR = empty.r - dr;
+            const baseC = empty.c - dc;
+            if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
+            if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
+
+            place(boardState.cells, orient, baseR, baseC, g.key);
+            invByGrade[g.key][s]--;
+            currentPlacements.push({ shape: s, grade: g.key, orient, baseR, baseC });
+            curQualitySum += g.priority;
+
+            dfs();
+
+            curQualitySum -= g.priority;
+            currentPlacements.pop();
+            invByGrade[g.key][s]++;
+            unplace(boardState.cells, orient, baseR, baseC);
+
+            if (opts.timedOut) return;
           }
         }
       }
     }
 
-    if (!best) {
-      // このセルは埋められない → そのセルをスキップ扱いにするため、番兵として次のループで同じ場所を見ないよう
-      // 「埋められない印」を一時的に入れる必要はない。以下でセルを探し直すだけ。
-      // 左上から探すので、このセルが残っている限り無限ループになる → 強制的に抜ける。
-      boardState.cells[empty.r][empty.c] = '__SKIP__';
-      continue;
-    }
-
-    // 配置
-    const cells = [];
-    for (const [dr, dc] of best.orient) {
-      const rr = best.baseR + dr;
-      const cc = best.baseC + dc;
-      boardState.cells[rr][cc] = best.piece.grade;
-      cells.push([rr, cc]);
-    }
-    used.add(best.piece.id);
-    placements.push({ boardKey, pieceId: best.piece.id, grade: best.piece.grade, cells });
+    boardState.cells[empty.r][empty.c] = '__SKIP__';
+    dfs();
+    boardState.cells[empty.r][empty.c] = null;
   }
 
-  // 番兵を戻す
+  dfs();
+
+  if (best.cellsSnapshot) removeSkipSentinels(best.cellsSnapshot, meta);
+  return best;
+}
+
+function snapshotCells(cells) {
+  return cells.map(r => r.slice());
+}
+
+function removeSkipSentinels(cells, meta) {
   for (let r = 0; r < meta.rows; r++) {
     for (let c = 0; c < meta.cols; c++) {
-      if (boardState.cells[r][c] === '__SKIP__') boardState.cells[r][c] = null;
+      if (cells[r][c] === '__SKIP__') cells[r][c] = null;
     }
   }
 }
 
-function findTopLeftEmpty(cells, meta) {
-  for (let r = 0; r < meta.rows; r++) {
-    for (let c = 0; c < meta.cols; c++) {
-      if (cells[r][c] === null) return { r, c };
+function scoreSnapshot(cells, placedQualitySum) {
+  return [
+    fullLinesOf(cells).length,
+    countRealCells(cells),
+    placedQualitySum,
+    gapShapeBonus(cells)
+  ];
+}
+
+function compareScores(a, b) {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+function upperBound(boardState, invByGrade, qualitySum) {
+  const { cells, meta } = boardState;
+  let emptyCount = 0;
+  let remainingPieces = 0;
+  let remainingQuality = 0;
+
+  for (const g of GRADES) {
+    for (const s of SHAPES) {
+      const n = invByGrade[g.key][s];
+      remainingPieces += n;
+      remainingQuality += n * g.priority;
     }
   }
-  return null;
+
+  let ubLines = 0;
+  for (let r = 0; r < meta.rows; r++) {
+    let real = 0;
+    let empty = 0;
+    for (let c = 0; c < meta.cols; c++) {
+      if (cells[r][c] === null) empty++;
+      else if (isRealCell(cells[r][c])) real++;
+    }
+    emptyCount += empty;
+    if (real + empty >= meta.cols) ubLines++;
+  }
+
+  const totalCells = meta.rows * meta.cols;
+  const ubFilled = countRealCells(cells) + Math.min(emptyCount, 4 * remainingPieces);
+  const ubGapBonus = ubFilled >= totalCells ? 0 : Math.floor((totalCells - ubFilled) / 4);
+  return [ubLines, ubFilled, qualitySum + remainingQuality, ubGapBonus];
+}
+
+function findNextEmpty(cells, meta, invByGrade = null) {
+  let fallback = null;
+  let best = null;
+  let bestCount = Infinity;
+
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      if (cells[r][c] !== null) continue;
+      const candidate = { r, c };
+      if (!fallback) fallback = candidate;
+      if (!invByGrade) return candidate;
+
+      const count = countCandidatesForCell(cells, meta, invByGrade, candidate);
+      if (count < bestCount) {
+        best = candidate;
+        bestCount = count;
+        if (count === 0) return best;
+      }
+    }
+  }
+
+  return best || fallback;
+}
+
+function countCandidatesForCell(cells, meta, invByGrade, empty) {
+  let count = 0;
+  for (const g of GRADES_DESC_PRIORITY) {
+    for (const s of SHAPES) {
+      if (invByGrade[g.key][s] === 0) continue;
+      for (const orient of SHAPE_ORIENTATIONS[s]) {
+        for (let i = 0; i < orient.length; i++) {
+          const [dr, dc] = orient[i];
+          const baseR = empty.r - dr;
+          const baseC = empty.c - dc;
+          if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
+          if (canPlaceOrient(cells, orient, baseR, baseC, meta)) count++;
+        }
+      }
+    }
+  }
+  return count;
 }
 
 function canPlaceOrient(cells, orient, baseR, baseC, meta) {
@@ -717,32 +1174,89 @@ function canPlaceOrient(cells, orient, baseR, baseC, meta) {
   return true;
 }
 
-function scorePlacement(cells, orient, baseR, baseC, meta, piece) {
-  // 仮置きして評価
-  const placed = [];
+function isAnchorCell(orient, idx, empty, baseR, baseC) {
+  const target = [empty.r - baseR, empty.c - baseC];
+  let min = null;
   for (const [dr, dc] of orient) {
-    const r = baseR + dr, c = baseC + dc;
-    cells[r][c] = piece.grade;
-    placed.push([r, c]);
+    if (baseR + dr !== empty.r || baseC + dc !== empty.c) continue;
+    if (!min || dr < min[0] || (dr === min[0] && dc < min[1])) min = [dr, dc];
   }
-  let completedLines = 0;
-  const affectedRows = new Set(placed.map(p => p[0]));
-  const isRealCell = v => v && v !== '__SKIP__';
-  for (const r of affectedRows) {
-    if (cells[r].every(isRealCell)) completedLines++;
-  }
-  // 行の埋まり率(密集)を加点
-  let denseScore = 0;
-  for (const r of affectedRows) {
-    const filled = cells[r].filter(isRealCell).length;
-    denseScore += filled;
-  }
-  // 戻す
-  for (const [r, c] of placed) cells[r][c] = null;
-
-  const gradeScore = gradeMap[piece.grade].priority;
-  return completedLines * 10000 + denseScore * 10 + gradeScore;
+  return !!min && orient[idx][0] === target[0] && orient[idx][1] === target[1] && target[0] === min[0] && target[1] === min[1];
 }
+
+function place(cells, orient, baseR, baseC, grade) {
+  for (const [dr, dc] of orient) cells[baseR + dr][baseC + dc] = grade;
+}
+
+function unplace(cells, orient, baseR, baseC) {
+  for (const [dr, dc] of orient) cells[baseR + dr][baseC + dc] = null;
+}
+
+function countRealCells(cells) {
+  let count = 0;
+  for (const row of cells) {
+    for (const cell of row) {
+      if (isRealCell(cell)) count++;
+    }
+  }
+  return count;
+}
+
+function isRealCell(value) {
+  return value !== null && value !== '__SKIP__';
+}
+
+function gapShapeBonus(cells) {
+  const rows = cells.length;
+  const cols = cells[0].length;
+  const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+  let bonus = 0;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (cells[r][c] !== null || visited[r][c]) continue;
+      const region = floodFillGap(cells, visited, r, c);
+      bonus += region.length === 4 && matchesAnyTetromino(region) ? 1 : -1;
+    }
+  }
+
+  return bonus;
+}
+
+function floodFillGap(cells, visited, startR, startC) {
+  const rows = cells.length;
+  const cols = cells[0].length;
+  const region = [];
+  const stack = [[startR, startC]];
+
+  while (stack.length) {
+    const [r, c] = stack.pop();
+    if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+    if (visited[r][c] || cells[r][c] !== null) continue;
+    visited[r][c] = true;
+    region.push([r, c]);
+    stack.push([r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]);
+  }
+
+  return region;
+}
+
+function matchesAnyTetromino(region) {
+  return TETROMINO_NORMALIZED_KEYS.has(normalizeRegionKey(region));
+}
+
+function normalizeRegionKey(region) {
+  const minR = Math.min(...region.map(p => p[0]));
+  const minC = Math.min(...region.map(p => p[1]));
+  const norm = region
+    .map(([r, c]) => [r - minR, c - minC])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return JSON.stringify(norm);
+}
+
+const TETROMINO_NORMALIZED_KEYS = new Set(
+  Object.values(SHAPE_ORIENTATIONS).flat().map(orient => normalizeRegionKey(orient))
+);
 
 // === 未使用ユニット表示 ===
 function renderUnused() {
