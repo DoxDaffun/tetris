@@ -276,6 +276,7 @@ function cacheEls() {
   el.memoToggle = document.getElementById('memoToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
+  el.solveBtnPrecise = document.getElementById('solveBtnPrecise');
   el.status = document.getElementById('status');
   el.inventory = document.getElementById('inventory');
   el.unusedPanel = document.getElementById('unusedPanel');
@@ -306,7 +307,8 @@ function init() {
   el.manualToggle.addEventListener('click', () => toggleManual());
   el.memoToggle.addEventListener('click', () => toggleMemo());
   el.resetBoard.addEventListener('click', resetBoards);
-  el.solveBtn.addEventListener('click', runSolve);
+  el.solveBtn.addEventListener('click', () => runSolve({ precise: false }));
+  el.solveBtnPrecise.addEventListener('click', () => runSolve({ precise: true }));
 
   renderModeTabs();
   renderBoardSelect();
@@ -869,7 +871,8 @@ function drawMiniShape(container, shape, grade) {
 }
 
 // === ソルバー ===
-function runSolve() {
+function runSolve(opts = { precise: false }) {
+  const precise = !!opts.precise;
   const solveOpts = { _anyTimedOut: false };
   const keys = selectedBoardKeys();
   if (keys.length === 0) {
@@ -920,7 +923,7 @@ function runSolve() {
   // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
   for (const k of keys) {
     const boardOpts = {
-      deadline: performance.now() + 500,
+      deadline: precise ? null : performance.now() + 500,
       timedOut: false
     };
     const result = solveBoard(boardStates[k], invByGrade, boardOpts);
@@ -958,9 +961,10 @@ function runSolve() {
   renderBoards();
   renderUnused();
 
-  const msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
+  const modeMsg = precise ? '[精密]' : '[基本]';
+  const msg = `${modeMsg} 最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
   const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
-  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示しています' : '';
+  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示中。精密モードで再計算可能' : '';
   setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
 }
 
@@ -991,12 +995,69 @@ function filterPieceNotes(bs, validIds) {
   bs.pieceNotes = notes;
 }
 
+function cloneInv(invByGrade) {
+  const clone = {};
+  for (const g of Object.keys(invByGrade)) clone[g] = { ...invByGrade[g] };
+  return clone;
+}
+
+// 貪欲法で素早く一解を作り、DFS の初期 best としてシードする。
+// 左上から空セルを順に埋め、最初に置けるピースを採用 (品質高い順)。
+// 置けないセルは __SKIP__ として残し、最後に null へ戻す。
+function greedySeed(boardState, invByGrade, meta) {
+  const cells = snapshotCells(boardState.cells);
+  const inv = cloneInv(invByGrade);
+  const placements = [];
+  let qualitySum = 0;
+
+  while (true) {
+    const empty = findNextEmpty(cells, meta);
+    if (!empty) break;
+
+    let placed = false;
+    outer: for (const g of GRADES_DESC_PRIORITY) {
+      for (const s of SHAPES) {
+        if (inv[g.key][s] === 0) continue;
+        for (const orient of SHAPE_ORIENTATIONS[s]) {
+          for (let i = 0; i < orient.length; i++) {
+            const [dr, dc] = orient[i];
+            const baseR = empty.r - dr;
+            const baseC = empty.c - dc;
+            if (!canPlaceOrient(cells, orient, baseR, baseC, meta)) continue;
+            place(cells, orient, baseR, baseC, g.key);
+            inv[g.key][s]--;
+            placements.push({ shape: s, grade: g.key, orient, baseR, baseC });
+            qualitySum += g.priority;
+            placed = true;
+            break outer;
+          }
+        }
+      }
+    }
+    if (!placed) cells[empty.r][empty.c] = '__SKIP__';
+  }
+
+  removeSkipSentinels(cells, meta);
+  return {
+    score: scoreSnapshot(cells, qualitySum),
+    cellsSnapshot: cells,
+    placements
+  };
+}
+
 function solveBoard(boardState, invByGrade, opts) {
   const { meta } = boardState;
   const deadline = opts.deadline;
   let best = { score: [-1, -1, -Infinity, -Infinity], cellsSnapshot: null, placements: [] };
   const currentPlacements = [];
   let curQualitySum = 0;
+
+  // greedy で初期解を取得し best にシードする。これにより DFS 序盤から
+  // upperBound 刈り込みが強く効き、探索木が大幅に縮む。
+  const seed = greedySeed(boardState, invByGrade, meta);
+  if (seed && compareScores(seed.score, best.score) > 0) {
+    best = seed;
+  }
 
   function considerCurrent() {
     const sc = scoreSnapshot(boardState.cells, curQualitySum);
@@ -1094,13 +1155,10 @@ function upperBound(boardState, invByGrade, qualitySum) {
   const { cells, meta } = boardState;
   let emptyCount = 0;
   let remainingPieces = 0;
-  let remainingQuality = 0;
 
   for (const g of GRADES) {
     for (const s of SHAPES) {
-      const n = invByGrade[g.key][s];
-      remainingPieces += n;
-      remainingQuality += n * g.priority;
+      remainingPieces += invByGrade[g.key][s];
     }
   }
 
@@ -1116,10 +1174,24 @@ function upperBound(boardState, invByGrade, qualitySum) {
     if (real + empty >= meta.cols) ubLines++;
   }
 
+  // 実際に置けるピース数の上限 = min(残ピース, floor(空セル/4))。
+  // 品質上界は「残ピースのうち高品質順 K 個」の合計だけを足す（過剰在庫時の緩い上界を引き締める）。
+  const placeable = Math.min(remainingPieces, Math.floor(emptyCount / 4));
+  let ubQualityAdd = 0;
+  let taken = 0;
+  for (const g of GRADES_DESC_PRIORITY) {
+    if (taken >= placeable) break;
+    let countAtGrade = 0;
+    for (const s of SHAPES) countAtGrade += invByGrade[g.key][s];
+    const take = Math.min(countAtGrade, placeable - taken);
+    ubQualityAdd += take * g.priority;
+    taken += take;
+  }
+
   const totalCells = meta.rows * meta.cols;
   const ubFilled = countRealCells(cells) + Math.min(emptyCount, 4 * remainingPieces);
   const ubGapBonus = ubFilled >= totalCells ? 0 : Math.floor((totalCells - ubFilled) / 4);
-  return [ubLines, ubFilled, qualitySum + remainingQuality, ubGapBonus];
+  return [ubLines, ubFilled, qualitySum + ubQualityAdd, ubGapBonus];
 }
 
 function findNextEmpty(cells, meta, invByGrade = null) {
