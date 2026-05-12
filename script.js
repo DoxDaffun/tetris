@@ -276,6 +276,7 @@ function cacheEls() {
   el.memoToggle = document.getElementById('memoToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
+  el.solveBtnPrecise = document.getElementById('solveBtnPrecise');
   el.status = document.getElementById('status');
   el.inventory = document.getElementById('inventory');
   el.unusedPanel = document.getElementById('unusedPanel');
@@ -306,7 +307,8 @@ function init() {
   el.manualToggle.addEventListener('click', () => toggleManual());
   el.memoToggle.addEventListener('click', () => toggleMemo());
   el.resetBoard.addEventListener('click', resetBoards);
-  el.solveBtn.addEventListener('click', runSolve);
+  el.solveBtn.addEventListener('click', () => runSolve({ precise: false }));
+  el.solveBtnPrecise.addEventListener('click', () => runSolve({ precise: true }));
 
   renderModeTabs();
   renderBoardSelect();
@@ -869,7 +871,8 @@ function drawMiniShape(container, shape, grade) {
 }
 
 // === ソルバー ===
-function runSolve() {
+function runSolve(opts = { precise: false }) {
+  const precise = !!opts.precise;
   const solveOpts = { _anyTimedOut: false };
   const keys = selectedBoardKeys();
   if (keys.length === 0) {
@@ -920,7 +923,7 @@ function runSolve() {
   // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
   for (const k of keys) {
     const boardOpts = {
-      deadline: performance.now() + 500,
+      deadline: precise ? null : performance.now() + 500,
       timedOut: false
     };
     const result = solveBoard(boardStates[k], invByGrade, boardOpts);
@@ -958,9 +961,10 @@ function runSolve() {
   renderBoards();
   renderUnused();
 
-  const msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
+  const modeMsg = precise ? '[精密]' : '[基本]';
+  const msg = `${modeMsg} 最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
   const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
-  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示しています' : '';
+  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示中。精密モードで再計算可能' : '';
   setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
 }
 
@@ -991,15 +995,230 @@ function filterPieceNotes(bs, validIds) {
   bs.pieceNotes = notes;
 }
 
+function cloneInv(invByGrade) {
+  const clone = {};
+  for (const g of Object.keys(invByGrade)) clone[g] = { ...invByGrade[g] };
+  return clone;
+}
+
+// === ペアマクロ (同形 2 個で 2×4 / 4×2 を作る) ===
+// O,I,L,J は同形 2 個で長方形を作れるため、DFS の各ノードで「1 ステップで
+// 8 セルを埋めるマクロ枝」として候補に加える。これにより探索深さが大幅に減る。
+// T は同形ペアで長方形にならない & L+J も鏡像関係で回転のみではペア不可。
+// マクロは単体配置と同列の DFS 枝として扱い、strict 順序にはしない (T が他形状と
+// 同等に序盤から候補に上がるため、T の単体配置が後回しにならない)。
+const MACROS = [
+  { name: 'OO_H', shape: 'O', height: 2, width: 4, pieces: [
+    { orient: SHAPE_ORIENTATIONS.O[0], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.O[0], dr: 0, dc: 2 }
+  ]},
+  { name: 'OO_V', shape: 'O', height: 4, width: 2, pieces: [
+    { orient: SHAPE_ORIENTATIONS.O[0], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.O[0], dr: 2, dc: 0 }
+  ]},
+  { name: 'II_H', shape: 'I', height: 2, width: 4, pieces: [
+    { orient: SHAPE_ORIENTATIONS.I[0], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.I[0], dr: 1, dc: 0 }
+  ]},
+  { name: 'II_V', shape: 'I', height: 4, width: 2, pieces: [
+    { orient: SHAPE_ORIENTATIONS.I[1], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.I[1], dr: 0, dc: 1 }
+  ]},
+  { name: 'LL_H', shape: 'L', height: 2, width: 4, pieces: [
+    { orient: SHAPE_ORIENTATIONS.L[1], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.L[3], dr: 0, dc: 1 }
+  ]},
+  { name: 'LL_V', shape: 'L', height: 4, width: 2, pieces: [
+    { orient: SHAPE_ORIENTATIONS.L[2], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.L[0], dr: 1, dc: 0 }
+  ]},
+  { name: 'JJ_H', shape: 'J', height: 2, width: 4, pieces: [
+    { orient: SHAPE_ORIENTATIONS.J[1], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.J[3], dr: 0, dc: 1 }
+  ]},
+  { name: 'JJ_V', shape: 'J', height: 4, width: 2, pieces: [
+    { orient: SHAPE_ORIENTATIONS.J[2], dr: 0, dc: 0 },
+    { orient: SHAPE_ORIENTATIONS.J[0], dr: 1, dc: 0 }
+  ]}
+];
+
+function canPlaceMacro(cells, macro, baseR, baseC, meta) {
+  if (baseR < 0 || baseC < 0) return false;
+  if (baseR + macro.height > meta.rows || baseC + macro.width > meta.cols) return false;
+  for (const p of macro.pieces) {
+    for (const [dr, dc] of p.orient) {
+      const r = baseR + p.dr + dr;
+      const c = baseC + p.dc + dc;
+      if (cells[r][c] !== null) return false;
+    }
+  }
+  return true;
+}
+
+function placeMacro(cells, macro, baseR, baseC) {
+  for (const p of macro.pieces) {
+    for (const [dr, dc] of p.orient) {
+      cells[baseR + p.dr + dr][baseC + p.dc + dc] = macro.shape;
+    }
+  }
+}
+
+function unplaceMacro(cells, macro, baseR, baseC) {
+  for (const p of macro.pieces) {
+    for (const [dr, dc] of p.orient) {
+      cells[baseR + p.dr + dr][baseC + p.dc + dc] = null;
+    }
+  }
+}
+
+// === 形状別 在庫集約 ===
+// DFS は shape 次元のみで分岐し、品質 (grade) は配置確定後に shape ごと
+// 「在庫上位品質から順」に割り当てる。配置位置によって最適 grade は変わらないため
+// (qualitySum は使用枚数に対し単調) この decoupling は厳密最適を保つ。
+function aggregateShapeInventory(invByGrade) {
+  const shapeInv = {};
+  for (const s of SHAPES) {
+    const arr = [];
+    for (const g of GRADES_DESC_PRIORITY) {
+      const n = invByGrade[g.key][s] | 0;
+      for (let i = 0; i < n; i++) arr.push(g);
+    }
+    shapeInv[s] = arr;
+  }
+  return shapeInv;
+}
+
+function computeQualityPrefix(shapeInv) {
+  const pre = {};
+  for (const s of SHAPES) {
+    const arr = shapeInv[s];
+    const p = new Array(arr.length + 1);
+    p[0] = 0;
+    for (let i = 0; i < arr.length; i++) p[i + 1] = p[i] + arr[i].priority;
+    pre[s] = p;
+  }
+  return pre;
+}
+
+function assignGradesToPlacements(placements, shapeInv) {
+  const pool = {};
+  for (const s of SHAPES) pool[s] = shapeInv[s].slice();
+  return placements.map(p => {
+    const grade = pool[p.shape].shift();
+    return { ...p, grade: grade.key };
+  });
+}
+
+function rewriteCellsWithGrades(cellsSnapshot, placementsWithGrade) {
+  for (const p of placementsWithGrade) {
+    for (const [dr, dc] of p.orient) {
+      cellsSnapshot[p.baseR + dr][p.baseC + dc] = p.grade;
+    }
+  }
+}
+
+// 貪欲法で素早く一解を作り、DFS の初期 best としてシードする。
+// 左上から空セルを順に埋め、「次に使われる grade の priority が高い shape」を優先。
+// 置けないセルは __SKIP__ として残し、最後に null へ戻す。
+function greedySeed(boardState, shapeInv, qualityPrefix, meta) {
+  const cells = snapshotCells(boardState.cells);
+  const shapeCount = {};
+  for (const s of SHAPES) shapeCount[s] = shapeInv[s].length;
+  const used = Object.fromEntries(SHAPES.map(s => [s, 0]));
+  const placements = [];
+
+  while (true) {
+    const empty = findNextEmpty(cells, meta);
+    if (!empty) break;
+
+    let placed = false;
+
+    // マクロ優先: 1 ステップで 8 セル充填し、greedy が高速に盤を埋める。
+    for (const macro of MACROS) {
+      if (used[macro.shape] + 2 > shapeCount[macro.shape]) continue;
+      if (!canPlaceMacro(cells, macro, empty.r, empty.c, meta)) continue;
+      placeMacro(cells, macro, empty.r, empty.c);
+      used[macro.shape] += 2;
+      for (const p of macro.pieces) {
+        placements.push({
+          shape: macro.shape,
+          orient: p.orient,
+          baseR: empty.r + p.dr,
+          baseC: empty.c + p.dc
+        });
+      }
+      placed = true;
+      break;
+    }
+
+    if (!placed) {
+      const order = SHAPES
+        .filter(s => used[s] < shapeCount[s])
+        .sort((a, b) => shapeInv[b][used[b]].priority - shapeInv[a][used[a]].priority);
+
+      outer: for (const s of order) {
+        for (const orient of SHAPE_ORIENTATIONS[s]) {
+          for (let i = 0; i < orient.length; i++) {
+            const [dr, dc] = orient[i];
+            const baseR = empty.r - dr;
+            const baseC = empty.c - dc;
+            if (!canPlaceOrient(cells, orient, baseR, baseC, meta)) continue;
+            place(cells, orient, baseR, baseC, s);
+            used[s]++;
+            placements.push({ shape: s, orient, baseR, baseC });
+            placed = true;
+            break outer;
+          }
+        }
+      }
+    }
+    if (!placed) cells[empty.r][empty.c] = '__SKIP__';
+  }
+
+  removeSkipSentinels(cells, meta);
+
+  let qualitySum = 0;
+  for (const s of SHAPES) qualitySum += qualityPrefix[s][used[s]];
+
+  const placementsWithGrade = assignGradesToPlacements(placements, shapeInv);
+  rewriteCellsWithGrades(cells, placementsWithGrade);
+
+  return {
+    score: scoreSnapshot(cells, qualitySum),
+    cellsSnapshot: cells,
+    placements: placementsWithGrade
+  };
+}
+
 function solveBoard(boardState, invByGrade, opts) {
   const { meta } = boardState;
   const deadline = opts.deadline;
+
+  const shapeInv = aggregateShapeInventory(invByGrade);
+  const qualityPrefix = computeQualityPrefix(shapeInv);
+  const remaining = {};
+  const used = {};
+  for (const s of SHAPES) {
+    remaining[s] = shapeInv[s].length;
+    used[s] = 0;
+  }
+
   let best = { score: [-1, -1, -Infinity, -Infinity], cellsSnapshot: null, placements: [] };
   const currentPlacements = [];
-  let curQualitySum = 0;
+
+  const seed = greedySeed(boardState, shapeInv, qualityPrefix, meta);
+  if (seed && compareScores(seed.score, best.score) > 0) {
+    best = seed;
+  }
+
+  function curQualitySum() {
+    let q = 0;
+    for (const s of SHAPES) q += qualityPrefix[s][used[s]];
+    return q;
+  }
 
   function considerCurrent() {
-    const sc = scoreSnapshot(boardState.cells, curQualitySum);
+    const sc = scoreSnapshot(boardState.cells, curQualitySum());
     if (compareScores(sc, best.score) > 0) {
       best = {
         score: sc,
@@ -1016,37 +1235,71 @@ function solveBoard(boardState, invByGrade, opts) {
       return;
     }
 
-    const ub = upperBound(boardState, invByGrade, curQualitySum);
+    const ub = upperBound(boardState, invByGrade, shapeInv, used, curQualitySum());
     if (compareScores(ub, best.score) <= 0) return;
 
-    const empty = findNextEmpty(boardState.cells, meta, invByGrade);
+    const empty = findNextEmpty(boardState.cells, meta, remaining);
     if (!empty) return;
 
-    for (const g of GRADES_DESC_PRIORITY) {
-      for (const s of SHAPES) {
-        if (invByGrade[g.key][s] === 0) continue;
-        for (const orient of SHAPE_ORIENTATIONS[s]) {
-          for (let i = 0; i < orient.length; i++) {
-            const [dr, dc] = orient[i];
-            const baseR = empty.r - dr;
-            const baseC = empty.c - dc;
-            if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
-            if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
+    // マクロ枝: 同形 2 個で 8 セル一気に充填。深さを半減させ枝幅は狭い。
+    // empty は findNextEmpty が返す scan 順最初の空セルなので、マクロを
+    // empty に top-left アンカーしたパターンだけ試せば十分 (他のアンカーは
+    // 別ノードでカバーされる)。
+    for (const macro of MACROS) {
+      if (remaining[macro.shape] < 2) continue;
+      if (!canPlaceMacro(boardState.cells, macro, empty.r, empty.c, meta)) continue;
 
-            place(boardState.cells, orient, baseR, baseC, g.key);
-            invByGrade[g.key][s]--;
-            currentPlacements.push({ shape: s, grade: g.key, orient, baseR, baseC });
-            curQualitySum += g.priority;
+      placeMacro(boardState.cells, macro, empty.r, empty.c);
+      remaining[macro.shape] -= 2;
+      used[macro.shape] += 2;
+      for (const p of macro.pieces) {
+        currentPlacements.push({
+          shape: macro.shape,
+          orient: p.orient,
+          baseR: empty.r + p.dr,
+          baseC: empty.c + p.dc
+        });
+      }
 
-            dfs();
+      dfs();
 
-            curQualitySum -= g.priority;
-            currentPlacements.pop();
-            invByGrade[g.key][s]++;
-            unplace(boardState.cells, orient, baseR, baseC);
+      currentPlacements.pop();
+      currentPlacements.pop();
+      used[macro.shape] -= 2;
+      remaining[macro.shape] += 2;
+      unplaceMacro(boardState.cells, macro, empty.r, empty.c);
 
-            if (opts.timedOut) return;
-          }
+      if (opts.timedOut) return;
+    }
+
+    // 単体枝: マクロが入らない/作れない形状 (T含む) もここで試行されるため
+    // T が後回しにならない。
+    const shapeOrder = SHAPES
+      .filter(s => remaining[s] > 0)
+      .sort((a, b) => shapeInv[b][used[b]].priority - shapeInv[a][used[a]].priority);
+
+    for (const s of shapeOrder) {
+      for (const orient of SHAPE_ORIENTATIONS[s]) {
+        for (let i = 0; i < orient.length; i++) {
+          const [dr, dc] = orient[i];
+          const baseR = empty.r - dr;
+          const baseC = empty.c - dc;
+          if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
+          if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
+
+          place(boardState.cells, orient, baseR, baseC, s);
+          remaining[s]--;
+          used[s]++;
+          currentPlacements.push({ shape: s, orient, baseR, baseC });
+
+          dfs();
+
+          currentPlacements.pop();
+          used[s]--;
+          remaining[s]++;
+          unplace(boardState.cells, orient, baseR, baseC);
+
+          if (opts.timedOut) return;
         }
       }
     }
@@ -1058,8 +1311,24 @@ function solveBoard(boardState, invByGrade, opts) {
 
   dfs();
 
-  if (best.cellsSnapshot) removeSkipSentinels(best.cellsSnapshot, meta);
-  return best;
+  // best.placements は seed 由来なら grade 付き、DFS 由来なら未割当 → post-hoc 割当。
+  let placementsWithGrade;
+  if (best.placements.length > 0 && best.placements[0].grade) {
+    placementsWithGrade = best.placements;
+    if (best.cellsSnapshot) removeSkipSentinels(best.cellsSnapshot, meta);
+  } else {
+    placementsWithGrade = assignGradesToPlacements(best.placements, shapeInv);
+    if (best.cellsSnapshot) {
+      removeSkipSentinels(best.cellsSnapshot, meta);
+      rewriteCellsWithGrades(best.cellsSnapshot, placementsWithGrade);
+    }
+  }
+
+  return {
+    score: best.score,
+    cellsSnapshot: best.cellsSnapshot,
+    placements: placementsWithGrade
+  };
 }
 
 function snapshotCells(cells) {
@@ -1090,19 +1359,11 @@ function compareScores(a, b) {
   return 0;
 }
 
-function upperBound(boardState, invByGrade, qualitySum) {
+function upperBound(boardState, invByGrade, shapeInv, used, qualitySum) {
   const { cells, meta } = boardState;
   let emptyCount = 0;
   let remainingPieces = 0;
-  let remainingQuality = 0;
-
-  for (const g of GRADES) {
-    for (const s of SHAPES) {
-      const n = invByGrade[g.key][s];
-      remainingPieces += n;
-      remainingQuality += n * g.priority;
-    }
-  }
+  for (const s of SHAPES) remainingPieces += shapeInv[s].length - used[s];
 
   let ubLines = 0;
   for (let r = 0; r < meta.rows; r++) {
@@ -1116,13 +1377,35 @@ function upperBound(boardState, invByGrade, qualitySum) {
     if (real + empty >= meta.cols) ubLines++;
   }
 
+  // 実際に置けるピース数の上限 = min(残ピース, floor(空セル/4))。
+  // 品質上界は残ピースを高 priority 順に placeable 個取って加算。
+  // used[s] は shape s で上位 grade から順に消費されるため、各 grade の
+  // 残数は invByGrade[g][s] から該当分を差し引いて求める。
+  const placeable = Math.min(remainingPieces, Math.floor(emptyCount / 4));
+  let ubQualityAdd = 0;
+  let taken = 0;
+  const usedRemain = { ...used };
+  for (const g of GRADES_DESC_PRIORITY) {
+    if (taken >= placeable) break;
+    let countAtGrade = 0;
+    for (const s of SHAPES) {
+      const inv = invByGrade[g.key][s] | 0;
+      const consumeHere = Math.min(usedRemain[s], inv);
+      usedRemain[s] -= consumeHere;
+      countAtGrade += inv - consumeHere;
+    }
+    const take = Math.min(countAtGrade, placeable - taken);
+    ubQualityAdd += take * g.priority;
+    taken += take;
+  }
+
   const totalCells = meta.rows * meta.cols;
   const ubFilled = countRealCells(cells) + Math.min(emptyCount, 4 * remainingPieces);
   const ubGapBonus = ubFilled >= totalCells ? 0 : Math.floor((totalCells - ubFilled) / 4);
-  return [ubLines, ubFilled, qualitySum + remainingQuality, ubGapBonus];
+  return [ubLines, ubFilled, qualitySum + ubQualityAdd, ubGapBonus];
 }
 
-function findNextEmpty(cells, meta, invByGrade = null) {
+function findNextEmpty(cells, meta, remaining = null) {
   let fallback = null;
   let best = null;
   let bestCount = Infinity;
@@ -1132,9 +1415,9 @@ function findNextEmpty(cells, meta, invByGrade = null) {
       if (cells[r][c] !== null) continue;
       const candidate = { r, c };
       if (!fallback) fallback = candidate;
-      if (!invByGrade) return candidate;
+      if (!remaining) return candidate;
 
-      const count = countCandidatesForCell(cells, meta, invByGrade, candidate);
+      const count = countCandidatesForCell(cells, meta, remaining, candidate);
       if (count < bestCount) {
         best = candidate;
         bestCount = count;
@@ -1146,19 +1429,17 @@ function findNextEmpty(cells, meta, invByGrade = null) {
   return best || fallback;
 }
 
-function countCandidatesForCell(cells, meta, invByGrade, empty) {
+function countCandidatesForCell(cells, meta, remaining, empty) {
   let count = 0;
-  for (const g of GRADES_DESC_PRIORITY) {
-    for (const s of SHAPES) {
-      if (invByGrade[g.key][s] === 0) continue;
-      for (const orient of SHAPE_ORIENTATIONS[s]) {
-        for (let i = 0; i < orient.length; i++) {
-          const [dr, dc] = orient[i];
-          const baseR = empty.r - dr;
-          const baseC = empty.c - dc;
-          if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
-          if (canPlaceOrient(cells, orient, baseR, baseC, meta)) count++;
-        }
+  for (const s of SHAPES) {
+    if (remaining[s] === 0) continue;
+    for (const orient of SHAPE_ORIENTATIONS[s]) {
+      for (let i = 0; i < orient.length; i++) {
+        const [dr, dc] = orient[i];
+        const baseR = empty.r - dr;
+        const baseC = empty.c - dc;
+        if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
+        if (canPlaceOrient(cells, orient, baseR, baseC, meta)) count++;
       }
     }
   }
