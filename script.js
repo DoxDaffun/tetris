@@ -63,6 +63,9 @@ const SHAPE_ORIENTATIONS = {
 };
 
 // === 状態 ===
+// 精密モード盤優先順位: メイン > 馬 > スケボー > セグウェイ
+const PRECISE_BOARD_RANK = { horse: 0, skateboard: 1, segway: 2 };
+
 const state = {
   boardsUsed: { segway: true, skateboard: false, horse: false },
   mainBoard: 'segway',
@@ -74,7 +77,10 @@ const state = {
   manualShape: 'T',
   boards: {},                    // boardKey -> { cells, locked, pieceIds, pieceNotes }
   inventory: {},                 // gradeKey -> shapeKey -> count
-  solveResult: null              // { placements, unused }
+  solveResult: null,             // { placements, unused }
+  inventoryMode: 'normal',       // 'normal' | 'precise'
+  unitMemo: [],                  // [{ id, grade, shape, effect, count }]
+  precisePriority: {}            // memoId -> number | null (null/missing = 除外)
 };
 
 function initState() {
@@ -89,6 +95,9 @@ function initState() {
   state.boards = {};
   state.inventory = {};
   state.solveResult = null;
+  state.inventoryMode = 'normal';
+  state.unitMemo = [];
+  state.precisePriority = {};
 
   for (const key of BOARD_ORDER) {
     const { rows, cols } = BOARDS[key];
@@ -105,6 +114,12 @@ function initState() {
   }
 }
 
+let memoIdSeq = 0;
+function newMemoId() {
+  memoIdSeq++;
+  return `memo_${Date.now().toString(36)}_${memoIdSeq.toString(36)}`;
+}
+
 // === 永続化 (localStorage) ===
 const STORAGE_KEY = 'unit-optimizer:v1';
 const MODES_STORAGE_KEY = 'unit-optimizer:v2';
@@ -116,7 +131,8 @@ let modeStore = createDefaultModeStore();
 function createDefaultModeStore() {
   return {
     activeMode: 0,
-    modes: DEFAULT_MODE_NAMES.map(name => ({ name, snapshot: {} }))
+    modes: DEFAULT_MODE_NAMES.map(name => ({ name, snapshot: {} })),
+    unitMemo: [] // 全モード共通の所持ユニット記録
   };
 }
 
@@ -130,8 +146,35 @@ function serializeStateSnapshot() {
     manualShape: state.manualShape,
     boards: state.boards,
     inventory: state.inventory,
-    solveResult: state.solveResult
+    solveResult: state.solveResult,
+    inventoryMode: state.inventoryMode,
+    precisePriority: state.precisePriority
+    // unitMemo は全モード共通のため modeStore のルートに保存し、ここには含めない
   };
+}
+
+function sanitizeMemoEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const grade = gradeMap[entry.grade] ? entry.grade : 'better';
+  const shape = SHAPES.includes(entry.shape) ? entry.shape : 'O';
+  const effect = EFFECT_KEYS.has(entry.effect) ? entry.effect : null;
+  const count = Math.max(1, Math.min(99, Math.floor(Number(entry.count) || 1)));
+  const id = typeof entry.id === 'string' && entry.id ? entry.id : newMemoId();
+  return { id, grade, shape, effect, count };
+}
+
+function sanitizeMemoList(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of list) {
+    const clean = sanitizeMemoEntry(entry);
+    if (!clean) continue;
+    if (seen.has(clean.id)) continue;
+    seen.add(clean.id);
+    out.push(clean);
+  }
+  return out;
 }
 
 function applySnapshotToState(snap) {
@@ -191,6 +234,23 @@ function applySnapshotToState(snap) {
       unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
     };
   }
+
+  if (snap.inventoryMode === 'precise' || snap.inventoryMode === 'normal') {
+    state.inventoryMode = snap.inventoryMode;
+  }
+
+  // unitMemo は modeStore のルートで共有しているのでスナップショットからは読まない
+
+  if (snap.precisePriority && typeof snap.precisePriority === 'object') {
+    const valid = {};
+    const memoIds = new Set(state.unitMemo.map(m => m.id));
+    for (const [id, raw] of Object.entries(snap.precisePriority)) {
+      if (!memoIds.has(id)) continue;
+      const n = Number(raw);
+      if (Number.isFinite(n)) valid[id] = n;
+    }
+    state.precisePriority = valid;
+  }
 }
 
 function sanitizePieceNotes(pieceNotes) {
@@ -219,6 +279,24 @@ function normalizeModeStore(rawStore) {
 
   const active = Number(source.activeMode);
   normalized.activeMode = Number.isInteger(active) && active >= 0 && active < MODE_COUNT ? active : 0;
+
+  // 共有 unitMemo: ルート優先。無ければ各モードのスナップショットから移行
+  // (旧バージョン互換)。共通 ID は先に出てきたものを採用。
+  if (Array.isArray(source.unitMemo) && source.unitMemo.length) {
+    normalized.unitMemo = sanitizeMemoList(source.unitMemo);
+  } else {
+    const merged = [];
+    for (const mode of normalized.modes) {
+      const memo = mode.snapshot && mode.snapshot.unitMemo;
+      if (Array.isArray(memo)) merged.push(...memo);
+    }
+    normalized.unitMemo = sanitizeMemoList(merged);
+  }
+  // 移行後はスナップショット側の unitMemo を削除して二重保持を防ぐ
+  for (const mode of normalized.modes) {
+    if (mode.snapshot && 'unitMemo' in mode.snapshot) delete mode.snapshot.unitMemo;
+  }
+
   return normalized;
 }
 
@@ -255,11 +333,19 @@ function loadModeStore() {
 
 function saveState() {
   modeStore.modes[modeStore.activeMode].snapshot = serializeStateSnapshot();
+  modeStore.unitMemo = state.unitMemo; // 参照を最新化 (mutation はその場で反映済)
   persistModeStore();
+}
+
+function syncSharedFromStore() {
+  // 共有データを active state へ反映。state.unitMemo は modeStore.unitMemo と
+  // 同じ配列参照を保ち、編集 (push/splice/フィールド更新) はそのまま全モードへ波及する。
+  state.unitMemo = modeStore.unitMemo;
 }
 
 function loadState() {
   loadModeStore();
+  syncSharedFromStore();
   applySnapshotToState(modeStore.modes[modeStore.activeMode].snapshot);
 }
 
@@ -276,9 +362,15 @@ function cacheEls() {
   el.memoToggle = document.getElementById('memoToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
-  el.solveBtnPrecise = document.getElementById('solveBtnPrecise');
   el.status = document.getElementById('status');
   el.inventory = document.getElementById('inventory');
+  el.preciseInputs = document.getElementById('preciseInputs');
+  el.inventoryHint = document.getElementById('inventoryHint');
+  el.invModeNormal = document.getElementById('invModeNormal');
+  el.invModePrecise = document.getElementById('invModePrecise');
+  el.memoSection = document.getElementById('memoSection');
+  el.memoList = document.getElementById('memoList');
+  el.memoAddBtn = document.getElementById('memoAddBtn');
   el.unusedPanel = document.getElementById('unusedPanel');
   el.unusedList = document.getElementById('unusedList');
 }
@@ -307,14 +399,25 @@ function init() {
   el.manualToggle.addEventListener('click', () => toggleManual());
   el.memoToggle.addEventListener('click', () => toggleMemo());
   el.resetBoard.addEventListener('click', resetBoards);
-  el.solveBtn.addEventListener('click', () => runSolve({ precise: false }));
-  el.solveBtnPrecise.addEventListener('click', () => runSolve({ precise: true }));
+  el.solveBtn.addEventListener('click', () => runSolve({ precise: state.inventoryMode === 'precise' }));
+
+  el.invModeNormal.addEventListener('click', () => setInventoryMode('normal'));
+  el.invModePrecise.addEventListener('click', () => setInventoryMode('precise'));
+  el.memoAddBtn.addEventListener('click', addMemoEntry);
 
   renderModeTabs();
   renderBoardSelect();
   renderBoards();
   renderInventory();
   renderUnused();
+}
+
+function setInventoryMode(mode) {
+  if (mode !== 'normal' && mode !== 'precise') return;
+  if (state.inventoryMode === mode) return;
+  state.inventoryMode = mode;
+  saveState();
+  renderInventory();
 }
 
 // === モードタブ UI ===
@@ -357,6 +460,7 @@ function switchMode(idx) {
   hideManualPicker();
   hideMemoPicker();
   initState();
+  syncSharedFromStore();
   applySnapshotToState(modeStore.modes[idx].snapshot);
   syncControlsToState();
   renderModeTabs();
@@ -384,6 +488,8 @@ function syncControlsToState() {
   el.eraseToggle.classList.toggle('active', state.paintMode === 'erase' && !state.memoMode);
   el.manualToggle.classList.toggle('active', state.manualPlacement);
   el.memoToggle.classList.toggle('active', state.memoMode);
+  el.invModeNormal.classList.toggle('active', state.inventoryMode !== 'precise');
+  el.invModePrecise.classList.toggle('active', state.inventoryMode === 'precise');
 }
 
 // === 盤選択 UI ===
@@ -788,6 +894,25 @@ function resetBoards() {
 
 // === 所持ユニット UI (35 スロット) ===
 function renderInventory() {
+  const precise = state.inventoryMode === 'precise';
+  el.invModeNormal.classList.toggle('active', !precise);
+  el.invModePrecise.classList.toggle('active', precise);
+
+  el.inventory.hidden = precise;
+  el.preciseInputs.hidden = !precise;
+  el.inventoryHint.textContent = precise
+    ? 'ユニットメモを元に優先度を数値入力（小さい数=高優先、空欄=計算から除外）'
+    : '各ユニットの所持数を入力';
+
+  if (precise) {
+    renderPreciseInputs();
+  } else {
+    renderNormalInventory();
+  }
+  renderMemoList();
+}
+
+function renderNormalInventory() {
   el.inventory.innerHTML = '';
 
   const table = document.createElement('div');
@@ -870,6 +995,206 @@ function drawMiniShape(container, shape, grade) {
   }
 }
 
+// === 精密モード 優先度入力 ===
+function renderPreciseInputs() {
+  el.preciseInputs.innerHTML = '';
+  if (!state.unitMemo.length) {
+    const empty = document.createElement('div');
+    empty.className = 'precise-empty';
+    empty.textContent = 'ユニットメモが空です。下の「ユニットメモ」を開いて所持ユニットを追加してください。';
+    el.preciseInputs.append(empty);
+    return;
+  }
+
+  // 表示順: 優先度の小さい順 (除外は末尾)、同率はメモ追加順
+  const annotated = state.unitMemo.map((m, idx) => {
+    const raw = state.precisePriority[m.id];
+    const pri = Number.isFinite(raw) ? Number(raw) : null;
+    return { memo: m, idx, pri };
+  });
+  annotated.sort((a, b) => {
+    if (a.pri === null && b.pri === null) return a.idx - b.idx;
+    if (a.pri === null) return 1;
+    if (b.pri === null) return -1;
+    if (a.pri !== b.pri) return a.pri - b.pri;
+    return a.idx - b.idx;
+  });
+
+  for (const { memo, pri } of annotated) {
+    const row = document.createElement('div');
+    row.className = 'precise-row';
+    if (pri === null) row.classList.add('excluded');
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'pri-input';
+    input.placeholder = '除外';
+    input.inputMode = 'numeric';
+    input.value = pri === null ? '' : String(pri);
+    input.addEventListener('input', () => {
+      const v = input.value.trim();
+      if (v === '') delete state.precisePriority[memo.id];
+      else {
+        const n = Number(v);
+        if (Number.isFinite(n)) state.precisePriority[memo.id] = n;
+      }
+      saveState();
+    });
+    input.addEventListener('blur', () => renderPreciseInputs());
+    row.append(input);
+
+    const g = gradeMap[memo.grade] || gradeMap.better;
+    const swatch = document.createElement('span');
+    swatch.className = 'pri-grade';
+    swatch.style.background = g.hex;
+    if (g.sparkle) swatch.classList.add('sparkle');
+    swatch.title = g.label;
+    row.append(swatch);
+
+    const label = document.createElement('span');
+    label.className = 'pri-label';
+    label.textContent = `${memo.shape} / ${g.label}`;
+    row.append(label);
+
+    const effect = document.createElement('span');
+    effect.className = 'pri-effect';
+    if (memo.effect && EFFECT_KEYS.has(memo.effect)) {
+      const def = EFFECTS.find(e => e.key === memo.effect);
+      effect.textContent = memo.effect;
+      effect.title = def ? `${def.labelJa} / ${def.labelEn}` : memo.effect;
+    } else {
+      effect.classList.add('none');
+      effect.textContent = '–';
+      effect.title = '効果なし';
+    }
+    row.append(effect);
+
+    const count = document.createElement('span');
+    count.className = 'pri-count';
+    count.textContent = memo.count > 1 ? `× ${memo.count}` : '';
+    row.append(count);
+
+    el.preciseInputs.append(row);
+  }
+}
+
+// === ユニットメモ UI ===
+function renderMemoList() {
+  el.memoList.innerHTML = '';
+  if (!state.unitMemo.length) {
+    const empty = document.createElement('div');
+    empty.className = 'memo-empty';
+    empty.textContent = 'まだメモがありません。「＋ ユニットを追加」から登録してください。';
+    el.memoList.append(empty);
+    return;
+  }
+
+  for (const memo of state.unitMemo) {
+    const row = document.createElement('div');
+    row.className = 'memo-row';
+
+    const gradeSel = document.createElement('select');
+    for (const g of GRADES) {
+      const o = document.createElement('option');
+      o.value = g.key;
+      o.textContent = g.label;
+      gradeSel.append(o);
+    }
+    gradeSel.value = memo.grade;
+    gradeSel.addEventListener('change', () => {
+      memo.grade = gradeSel.value;
+      saveState();
+      if (state.inventoryMode === 'precise') renderPreciseInputs();
+    });
+    row.append(gradeSel);
+
+    const shapeSel = document.createElement('select');
+    for (const s of SHAPES) {
+      const o = document.createElement('option');
+      o.value = s;
+      o.textContent = s;
+      shapeSel.append(o);
+    }
+    shapeSel.value = memo.shape;
+    shapeSel.addEventListener('change', () => {
+      memo.shape = shapeSel.value;
+      saveState();
+      if (state.inventoryMode === 'precise') renderPreciseInputs();
+    });
+    row.append(shapeSel);
+
+    const effectSel = document.createElement('select');
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '– 効果なし';
+    effectSel.append(noneOpt);
+    for (const e of EFFECTS) {
+      const o = document.createElement('option');
+      o.value = e.key;
+      o.textContent = `${e.key} / ${e.labelJa}`;
+      effectSel.append(o);
+    }
+    effectSel.value = memo.effect || '';
+    effectSel.addEventListener('change', () => {
+      memo.effect = EFFECT_KEYS.has(effectSel.value) ? effectSel.value : null;
+      saveState();
+      if (state.inventoryMode === 'precise') renderPreciseInputs();
+    });
+    row.append(effectSel);
+
+    const countInput = document.createElement('input');
+    countInput.type = 'number';
+    countInput.min = '1';
+    countInput.max = '99';
+    countInput.inputMode = 'numeric';
+    countInput.value = String(memo.count);
+    countInput.addEventListener('input', () => {
+      const v = Math.max(1, Math.min(99, Math.floor(Number(countInput.value) || 1)));
+      memo.count = v;
+      saveState();
+      if (state.inventoryMode === 'precise') renderPreciseInputs();
+    });
+    row.append(countInput);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'memo-delete';
+    del.textContent = '削除';
+    del.addEventListener('click', () => {
+      // 共有配列を破壊せず in-place 削除 (modeStore.unitMemo の参照を維持)
+      const idx = state.unitMemo.findIndex(m => m.id === memo.id);
+      if (idx >= 0) state.unitMemo.splice(idx, 1);
+      // 全モードの優先度から該当 ID をスクラブ
+      delete state.precisePriority[memo.id];
+      for (let i = 0; i < modeStore.modes.length; i++) {
+        if (i === modeStore.activeMode) continue;
+        const snap = modeStore.modes[i].snapshot;
+        if (snap && snap.precisePriority) delete snap.precisePriority[memo.id];
+      }
+      saveState();
+      renderInventory();
+    });
+    row.append(del);
+
+    el.memoList.append(row);
+  }
+}
+
+function addMemoEntry() {
+  const lastEntry = state.unitMemo[state.unitMemo.length - 1];
+  const entry = {
+    id: newMemoId(),
+    grade: lastEntry ? lastEntry.grade : 'better',
+    shape: lastEntry ? lastEntry.shape : 'O',
+    effect: null,
+    count: 1
+  };
+  state.unitMemo.push(entry);
+  saveState();
+  if (!el.memoSection.open) el.memoSection.open = true;
+  renderInventory();
+}
+
 // === ソルバー ===
 // 精密モードは探索空間が大きい入力でメインスレッドを長時間占有し、
 // ブラウザから「応答なし」と判定されることがあった。
@@ -891,9 +1216,25 @@ async function runSolve(opts = { precise: false }) {
   const precise = !!opts.precise;
   const profile = precise ? SOLVER_PROFILES.precise : SOLVER_PROFILES.basic;
   const solveOpts = { _anyTimedOut: false };
-  const keys = selectedBoardKeys();
+  const keys = orderedBoardKeysForSolve(precise);
   if (keys.length === 0) {
     setStatus('使用する盤を選択してください');
+    return;
+  }
+
+  let shapeInv;
+  try {
+    shapeInv = precise ? buildPreciseShapeInv() : buildNormalShapeInv();
+  } catch (err) {
+    setStatus(err.message || String(err));
+    return;
+  }
+
+  const totalUnits = SHAPES.reduce((acc, s) => acc + shapeInv[s].length, 0);
+  if (totalUnits === 0) {
+    setStatus(precise
+      ? '精密モード: 計算対象のユニットがありません (ユニットメモまたは優先度を確認)'
+      : '所持ユニットが入力されていません');
     return;
   }
 
@@ -902,22 +1243,6 @@ async function runSolve(opts = { precise: false }) {
   setStatus(`[${profile.label}] 計算中...`);
 
   try {
-    // DFS 中に同種ユニットを O(1) で消費/復元できるよう grade × shape の残数で持つ。
-    const invByGrade = {};
-    for (const g of GRADES) {
-      invByGrade[g.key] = Object.fromEntries(SHAPES.map(s => [s, state.inventory[g.key][s] | 0]));
-    }
-
-    // 採用配置から具体的な pieceId を復元するための ID プール。
-    const pieceIdPool = {};
-    for (const g of GRADES) {
-      pieceIdPool[g.key] = {};
-      for (const s of SHAPES) {
-        const n = invByGrade[g.key][s];
-        pieceIdPool[g.key][s] = Array.from({ length: n }, (_, i) => `${g.key}_${s}_${i}`);
-      }
-    }
-
     // 盤ごとに固定(locked)と既存配置の状態をコピー
     const boardStates = {};
     for (const k of keys) {
@@ -940,21 +1265,31 @@ async function runSolve(opts = { precise: false }) {
       pruneOrphanNotes(state.boards[k]);
     }
 
-    const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
+    const placements = []; // { boardKey, pieceId, grade, effect, memoId, cells }
+    let pieceSeq = 0;
 
-    // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
+    // 盤の優先順: precise なら main > horse > skateboard > segway。
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i];
       const boardOpts = createSolverRunOptions(profile, k, i + 1, keys.length);
-      const result = await solveBoard(boardStates[k], invByGrade, boardOpts);
+      const result = await solveBoard(boardStates[k], shapeInv, boardOpts);
       boardStates[k].cells = result.cellsSnapshot ?? boardStates[k].cells;
 
-      // DFS 中の消費は探索復帰時に戻るため、採用配置だけここで実消費する。
+      // 採用された分だけ shapeInv からトップアイテムを消費 (先頭から取り除く)。
       for (const p of result.placements) {
-        invByGrade[p.grade][p.shape]--;
-        const pid = pieceIdPool[p.grade][p.shape].pop();
+        const unit = shapeInv[p.shape].shift();
+        if (!unit) continue;
+        pieceSeq++;
+        const pid = `solve_${pieceSeq}_${unit.key}_${p.shape}`;
         const cells = p.orient.map(([dr, dc]) => [p.baseR + dr, p.baseC + dc]);
-        placements.push({ boardKey: k, pieceId: pid, grade: p.grade, cells });
+        placements.push({
+          boardKey: k,
+          pieceId: pid,
+          grade: unit.key,
+          effect: unit.effect || null,
+          memoId: unit.memoId || null,
+          cells
+        });
       }
       if (boardOpts.timedOut) solveOpts._anyTimedOut = true;
       await yieldToBrowser();
@@ -967,13 +1302,22 @@ async function runSolve(opts = { precise: false }) {
     }
     for (const p of placements) {
       const bs = state.boards[p.boardKey];
-      for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
+      for (const [r, c] of p.cells) {
+        bs.pieceIds[r][c] = p.pieceId;
+        // セルの色は配置されたユニットの grade で確定
+        bs.cells[r][c] = p.grade;
+      }
+      if (p.effect && EFFECT_KEYS.has(p.effect)) {
+        if (!bs.pieceNotes) bs.pieceNotes = {};
+        bs.pieceNotes[p.pieceId] = p.effect;
+      }
     }
 
+    // 残り (使わなかった) ユニットを未使用一覧として集計
     const unused = [];
-    for (const g of GRADES) {
-      for (const s of SHAPES) {
-        for (const id of pieceIdPool[g.key][s]) unused.push({ id, grade: g.key, shape: s });
+    for (const s of SHAPES) {
+      for (const unit of shapeInv[s]) {
+        unused.push({ id: `${unit.key}_${s}_unused_${unused.length}`, grade: unit.key, shape: s });
       }
     }
     state.solveResult = { placements, unused };
@@ -993,6 +1337,84 @@ async function runSolve(opts = { precise: false }) {
     solveInProgress = false;
     setControlsDisabled(false);
   }
+}
+
+function orderedBoardKeysForSolve(precise) {
+  const used = BOARD_ORDER.filter(k => state.boardsUsed[k]);
+  if (!used.length) return [];
+  if (!precise) {
+    return selectedBoardKeys(); // メイン先頭、他は BOARD_ORDER 順
+  }
+  // 精密モード: メイン → 馬 → スケボー → セグウェイ (使用中のもののみ)
+  return used.slice().sort((a, b) => {
+    if (a === state.mainBoard) return -1;
+    if (b === state.mainBoard) return 1;
+    return PRECISE_BOARD_RANK[a] - PRECISE_BOARD_RANK[b];
+  });
+}
+
+// === ソルバー用ユニットプール構築 ===
+// 各 shape ごとに、品質順 (normal) または優先度順 (precise) で
+// 重み (weight) の降順に並んだユニット配列を返す。
+// 各エントリ: { key: gradeKey, weight, sparkle, hex, label, effect?, memoId? }
+function buildNormalShapeInv() {
+  const shapeInv = {};
+  for (const s of SHAPES) {
+    const arr = [];
+    for (const g of GRADES_DESC_PRIORITY) {
+      const n = state.inventory[g.key][s] | 0;
+      for (let i = 0; i < n; i++) {
+        arr.push({ key: g.key, weight: g.priority, sparkle: g.sparkle, hex: g.hex, label: g.label, effect: null, memoId: null });
+      }
+    }
+    shapeInv[s] = arr;
+  }
+  return shapeInv;
+}
+
+function buildPreciseShapeInv() {
+  const active = [];
+  for (const memo of state.unitMemo) {
+    const raw = state.precisePriority[memo.id];
+    const pri = Number.isFinite(raw) ? Number(raw) : null;
+    if (pri === null) continue; // 除外
+    active.push({ memo, pri });
+  }
+  if (!active.length) {
+    throw new Error('精密モード: 優先度が設定されたユニットがありません');
+  }
+  // 重み: 高優先 (=数値が小さい) ほど高い weight を割り当てる。
+  // weight = MAX_PRI + 1 - userPriority。範囲は >0 を保証 (weight 0 だと
+  // upperBound の比較で「未配置と等価」とみなされる)。
+  const maxPri = active.reduce((m, a) => Math.max(m, a.pri), 0);
+  const minPri = active.reduce((m, a) => Math.min(m, a.pri), maxPri);
+  const offset = Math.max(0, 1 - minPri); // minPri が 0 以下でも weight > 0 にする
+  const weightOf = (pri) => (maxPri + 1 - pri) + offset;
+
+  const shapeInv = {};
+  for (const s of SHAPES) shapeInv[s] = [];
+
+  for (const { memo, pri } of active) {
+    const g = gradeMap[memo.grade] || gradeMap.better;
+    const weight = weightOf(pri);
+    for (let i = 0; i < memo.count; i++) {
+      shapeInv[memo.shape].push({
+        key: memo.grade,
+        weight,
+        sparkle: g.sparkle,
+        hex: g.hex,
+        label: g.label,
+        effect: memo.effect || null,
+        memoId: memo.id
+      });
+    }
+  }
+
+  // weight 降順 (高優先が先頭) にソート
+  for (const s of SHAPES) {
+    shapeInv[s].sort((a, b) => b.weight - a.weight);
+  }
+  return shapeInv;
 }
 
 
@@ -1077,12 +1499,6 @@ function filterPieceNotes(bs, validIds) {
   bs.pieceNotes = notes;
 }
 
-function cloneInv(invByGrade) {
-  const clone = {};
-  for (const g of Object.keys(invByGrade)) clone[g] = { ...invByGrade[g] };
-  return clone;
-}
-
 // === ペアマクロ (同形 2 個で 2×4 / 4×2 を作る) ===
 // O,I,L,J は同形 2 個で長方形を作れるため、DFS の各ノードで「1 ステップで
 // 8 セルを埋めるマクロ枝」として候補に加える。これにより探索深さが大幅に減る。
@@ -1153,22 +1569,12 @@ function unplaceMacro(cells, macro, baseR, baseC) {
   }
 }
 
-// === 形状別 在庫集約 ===
-// DFS は shape 次元のみで分岐し、品質 (grade) は配置確定後に shape ごと
-// 「在庫上位品質から順」に割り当てる。配置位置によって最適 grade は変わらないため
-// (qualitySum は使用枚数に対し単調) この decoupling は厳密最適を保つ。
-function aggregateShapeInventory(invByGrade) {
-  const shapeInv = {};
-  for (const s of SHAPES) {
-    const arr = [];
-    for (const g of GRADES_DESC_PRIORITY) {
-      const n = invByGrade[g.key][s] | 0;
-      for (let i = 0; i < n; i++) arr.push(g);
-    }
-    shapeInv[s] = arr;
-  }
-  return shapeInv;
-}
+// === 形状別 在庫プール ===
+// DFS は shape 次元のみで分岐し、品質/優先度 (weight) は配置確定後に
+// shape ごと「在庫上位 weight から順」に割り当てる。配置位置によって
+// 最適 weight 配分は変わらないため (qualitySum は使用枚数に対し単調)
+// この decoupling は厳密最適を保つ。
+// shapeInv[s] は { key, weight, ..., effect?, memoId? } の配列で weight 降順。
 
 function computeQualityPrefix(shapeInv) {
   const pre = {};
@@ -1176,7 +1582,7 @@ function computeQualityPrefix(shapeInv) {
     const arr = shapeInv[s];
     const p = new Array(arr.length + 1);
     p[0] = 0;
-    for (let i = 0; i < arr.length; i++) p[i + 1] = p[i] + arr[i].priority;
+    for (let i = 0; i < arr.length; i++) p[i + 1] = p[i] + arr[i].weight;
     pre[s] = p;
   }
   return pre;
@@ -1186,8 +1592,8 @@ function assignGradesToPlacements(placements, shapeInv) {
   const pool = {};
   for (const s of SHAPES) pool[s] = shapeInv[s].slice();
   return placements.map(p => {
-    const grade = pool[p.shape].shift();
-    return { ...p, grade: grade.key };
+    const unit = pool[p.shape].shift();
+    return { ...p, grade: unit.key, effect: unit.effect || null, memoId: unit.memoId || null };
   });
 }
 
@@ -1200,7 +1606,7 @@ function rewriteCellsWithGrades(cellsSnapshot, placementsWithGrade) {
 }
 
 // 貪欲法で素早く一解を作り、DFS の初期 best としてシードする。
-// 左上から空セルを順に埋め、「次に使われる grade の priority が高い shape」を優先。
+// 左上から空セルを順に埋め、「次に使われるユニットの weight が高い shape」を優先。
 // 置けないセルは __SKIP__ として残し、最後に null へ戻す。
 function greedySeed(boardState, shapeInv, qualityPrefix, meta) {
   const cells = snapshotCells(boardState.cells);
@@ -1236,7 +1642,7 @@ function greedySeed(boardState, shapeInv, qualityPrefix, meta) {
     if (!placed) {
       const order = SHAPES
         .filter(s => used[s] < shapeCount[s])
-        .sort((a, b) => shapeInv[b][used[b]].priority - shapeInv[a][used[a]].priority);
+        .sort((a, b) => shapeInv[b][used[b]].weight - shapeInv[a][used[a]].weight);
 
       outer: for (const s of order) {
         for (const orient of SHAPE_ORIENTATIONS[s]) {
@@ -1272,10 +1678,9 @@ function greedySeed(boardState, shapeInv, qualityPrefix, meta) {
   };
 }
 
-async function solveBoard(boardState, invByGrade, opts) {
+async function solveBoard(boardState, shapeInv, opts) {
   const { meta } = boardState;
 
-  const shapeInv = aggregateShapeInventory(invByGrade);
   const qualityPrefix = computeQualityPrefix(shapeInv);
   const remaining = {};
   const used = {};
@@ -1315,7 +1720,7 @@ async function solveBoard(boardState, invByGrade, opts) {
     if (pause) await pause;
     if (opts.timedOut) return;
 
-    const ub = upperBound(boardState, invByGrade, shapeInv, used, curQualitySum());
+    const ub = upperBound(boardState, shapeInv, used, curQualitySum());
     if (compareScores(ub, best.score) <= 0) return;
 
     const empty = findNextEmpty(boardState.cells, meta, remaining);
@@ -1356,7 +1761,7 @@ async function solveBoard(boardState, invByGrade, opts) {
     // T が後回しにならない。
     const shapeOrder = SHAPES
       .filter(s => remaining[s] > 0)
-      .sort((a, b) => shapeInv[b][used[b]].priority - shapeInv[a][used[a]].priority);
+      .sort((a, b) => shapeInv[b][used[b]].weight - shapeInv[a][used[a]].weight);
 
     for (const s of shapeOrder) {
       for (const orient of SHAPE_ORIENTATIONS[s]) {
@@ -1439,7 +1844,7 @@ function compareScores(a, b) {
   return 0;
 }
 
-function upperBound(boardState, invByGrade, shapeInv, used, qualitySum) {
+function upperBound(boardState, shapeInv, used, qualitySum) {
   const { cells, meta } = boardState;
   let emptyCount = 0;
   let remainingPieces = 0;
@@ -1458,25 +1863,25 @@ function upperBound(boardState, invByGrade, shapeInv, used, qualitySum) {
   }
 
   // 実際に置けるピース数の上限 = min(残ピース, floor(空セル/4))。
-  // 品質上界は残ピースを高 priority 順に placeable 個取って加算。
-  // used[s] は shape s で上位 grade から順に消費されるため、各 grade の
-  // 残数は invByGrade[g][s] から該当分を差し引いて求める。
+  // weight 上界は残ピースを高 weight 順に placeable 個取って加算。
+  // 各 shape の shapeInv は weight 降順ソート済 & used[s] は先頭から消費
+  // されるので、ptr[s] = used[s] を初期値に 5-way マージで top-k を取れば良い。
   const placeable = Math.min(remainingPieces, Math.floor(emptyCount / 4));
   let ubQualityAdd = 0;
-  let taken = 0;
-  const usedRemain = { ...used };
-  for (const g of GRADES_DESC_PRIORITY) {
-    if (taken >= placeable) break;
-    let countAtGrade = 0;
+  const ptr = {};
+  for (const s of SHAPES) ptr[s] = used[s];
+  for (let k = 0; k < placeable; k++) {
+    let bestShape = null;
+    let bestWeight = -Infinity;
     for (const s of SHAPES) {
-      const inv = invByGrade[g.key][s] | 0;
-      const consumeHere = Math.min(usedRemain[s], inv);
-      usedRemain[s] -= consumeHere;
-      countAtGrade += inv - consumeHere;
+      const arr = shapeInv[s];
+      if (ptr[s] >= arr.length) continue;
+      const w = arr[ptr[s]].weight;
+      if (w > bestWeight) { bestWeight = w; bestShape = s; }
     }
-    const take = Math.min(countAtGrade, placeable - taken);
-    ubQualityAdd += take * g.priority;
-    taken += take;
+    if (bestShape === null) break;
+    ubQualityAdd += bestWeight;
+    ptr[bestShape]++;
   }
 
   const totalCells = meta.rows * meta.cols;

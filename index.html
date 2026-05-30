@@ -39,14 +39,29 @@
     </section>
 
     <section class="panel">
-      <h2>所持ユニット / Units</h2>
-      <p class="hint-text">各ユニットの所持数を入力</p>
+      <div class="row-between">
+        <h2>所持ユニット / Units</h2>
+        <div class="inv-mode-tabs">
+          <button id="invModeNormal" class="active" type="button">通常モード</button>
+          <button id="invModePrecise" type="button">精密モード</button>
+        </div>
+      </div>
+      <p id="inventoryHint" class="hint-text">各ユニットの所持数を入力</p>
       <div id="inventory" class="inventory"></div>
+      <div id="preciseInputs" class="precise-inputs" hidden></div>
+
+      <details id="memoSection" class="memo-section">
+        <summary>ユニットメモ / Unit memo</summary>
+        <p class="hint-text">所持ユニットを 1 個ずつ品質・形状・効果付きで記録できます。精密モードの入力欄に反映されます。</p>
+        <div id="memoList" class="memo-list"></div>
+        <div class="memo-actions">
+          <button id="memoAddBtn" type="button">＋ ユニットを追加</button>
+        </div>
+      </details>
     </section>
 
     <section class="panel actions-panel">
       <button id="solveBtn" class="primary">最適化 / Solve</button>
-      <button id="solveBtnPrecise">精密モード / Precise</button>
       <div id="status" class="status">準備完了</div>
     </section>
 

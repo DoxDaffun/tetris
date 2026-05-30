@@ -417,3 +417,154 @@ button.active { border-color: var(--accent); color: var(--accent); }
   width: 100%;
   max-width: 244px;
 }
+
+/* ========== Inventory mode tabs ========== */
+.inv-mode-tabs {
+  display: flex;
+  gap: 4px;
+}
+.inv-mode-tabs button {
+  font-size: 0.78rem;
+  padding: 4px 10px;
+}
+
+/* ========== Precise inputs ========== */
+.precise-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.precise-empty {
+  font-size: 0.78rem;
+  color: var(--muted);
+  padding: 12px;
+  text-align: center;
+  background: #11172b;
+  border-radius: 6px;
+}
+
+.precise-row {
+  display: grid;
+  grid-template-columns: 60px auto 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: #11172b;
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+.precise-row.excluded { opacity: 0.45; }
+
+.precise-row .pri-input {
+  width: 52px;
+  padding: 3px 4px;
+  text-align: center;
+  font-size: 0.82rem;
+}
+
+.precise-row .pri-grade {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(0,0,0,0.4);
+}
+
+.precise-row .pri-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.precise-row .pri-effect {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #242a44;
+  font-size: 0.72rem;
+  color: var(--accent);
+  font-weight: 700;
+}
+.precise-row .pri-effect.none {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.precise-row .pri-count {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* ========== Memo section ========== */
+.memo-section {
+  margin-top: 10px;
+  background: #11172b;
+  border-radius: 8px;
+  padding: 6px 10px 10px;
+}
+.memo-section summary {
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.memo-section[open] summary { color: var(--text); }
+.memo-section .hint-text { margin: 2px 0 6px; }
+
+.memo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.memo-empty {
+  font-size: 0.78rem;
+  color: var(--muted);
+  padding: 8px;
+  text-align: center;
+}
+
+.memo-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 60px auto;
+  gap: 4px;
+  align-items: center;
+}
+.memo-row select,
+.memo-row input[type="number"] {
+  font-size: 0.75rem;
+  padding: 3px 4px;
+  width: 100%;
+}
+.memo-row .memo-delete {
+  padding: 3px 7px;
+  font-size: 0.78rem;
+  color: #ff8a8a;
+  border-color: #553;
+}
+
+.memo-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.memo-actions button {
+  font-size: 0.78rem;
+  padding: 4px 10px;
+}
+
+@media (max-width: 480px) {
+  .precise-row {
+    grid-template-columns: 50px auto 1fr auto;
+    font-size: 0.72rem;
+  }
+  .precise-row .pri-count { grid-column: 2 / -1; text-align: right; }
+  .memo-row {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .memo-row select { font-size: 0.72rem; }
+  .memo-row input[type="number"] { grid-column: 1 / 2; }
+  .memo-row .memo-delete { grid-column: 3 / 4; justify-self: end; }
+}
