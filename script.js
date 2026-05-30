@@ -871,8 +871,25 @@ function drawMiniShape(container, shape, grade) {
 }
 
 // === ソルバー ===
-function runSolve(opts = { precise: false }) {
+// 精密モードは探索空間が大きい入力でメインスレッドを長時間占有し、
+// ブラウザから「応答なし」と判定されることがあった。
+// 今後、精密モードの計算ロジックを差し替えやすいよう、通常/精密の
+// 実行条件をプロファイルとして分離し、どちらも一定間隔で UI に制御を返す。
+const SOLVER_PROFILES = {
+  basic: { label: '基本', perBoardMs: 500, yieldEveryMs: 16, statusEveryMs: 200 },
+  precise: { label: '精密', perBoardMs: 10000, yieldEveryMs: 8, statusEveryMs: 250 }
+};
+
+let solveInProgress = false;
+
+async function runSolve(opts = { precise: false }) {
+  if (solveInProgress) {
+    setStatus('計算中です。完了までお待ちください');
+    return;
+  }
+
   const precise = !!opts.precise;
+  const profile = precise ? SOLVER_PROFILES.precise : SOLVER_PROFILES.basic;
   const solveOpts = { _anyTimedOut: false };
   const keys = selectedBoardKeys();
   if (keys.length === 0) {
@@ -880,92 +897,157 @@ function runSolve(opts = { precise: false }) {
     return;
   }
 
-  // DFS 中に同種ユニットを O(1) で消費/復元できるよう grade × shape の残数で持つ。
-  const invByGrade = {};
-  for (const g of GRADES) {
-    invByGrade[g.key] = Object.fromEntries(SHAPES.map(s => [s, state.inventory[g.key][s] | 0]));
-  }
+  solveInProgress = true;
+  setControlsDisabled(true);
+  setStatus(`[${profile.label}] 計算中...`);
 
-  // 採用配置から具体的な pieceId を復元するための ID プール。
-  const pieceIdPool = {};
-  for (const g of GRADES) {
-    pieceIdPool[g.key] = {};
-    for (const s of SHAPES) {
-      const n = invByGrade[g.key][s];
-      pieceIdPool[g.key][s] = Array.from({ length: n }, (_, i) => `${g.key}_${s}_${i}`);
+  try {
+    // DFS 中に同種ユニットを O(1) で消費/復元できるよう grade × shape の残数で持つ。
+    const invByGrade = {};
+    for (const g of GRADES) {
+      invByGrade[g.key] = Object.fromEntries(SHAPES.map(s => [s, state.inventory[g.key][s] | 0]));
     }
-  }
 
-  // 盤ごとに固定(locked)と既存配置の状態をコピー
-  const boardStates = {};
-  for (const k of keys) {
-    boardStates[k] = {
-      cells: state.boards[k].cells.map(r => r.slice()),
-      locked: state.boards[k].locked.map(r => r.slice()),
-      meta: BOARDS[k]
-    };
-  }
-
-  // 既存の非ロックセルはソルバー用にクリア(前回の配置を消す)
-  for (const k of keys) {
-    keepNotesForLockedPieces(state.boards[k]);
-    for (let r = 0; r < boardStates[k].meta.rows; r++) {
-      for (let c = 0; c < boardStates[k].meta.cols; c++) {
-        if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
-        if (!state.boards[k].locked[r][c]) state.boards[k].pieceIds[r][c] = null;
+    // 採用配置から具体的な pieceId を復元するための ID プール。
+    const pieceIdPool = {};
+    for (const g of GRADES) {
+      pieceIdPool[g.key] = {};
+      for (const s of SHAPES) {
+        const n = invByGrade[g.key][s];
+        pieceIdPool[g.key][s] = Array.from({ length: n }, (_, i) => `${g.key}_${s}_${i}`);
       }
     }
-    pruneOrphanNotes(state.boards[k]);
-  }
 
-  const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
-
-  // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
-  for (const k of keys) {
-    const boardOpts = {
-      deadline: precise ? null : performance.now() + 500,
-      timedOut: false
-    };
-    const result = solveBoard(boardStates[k], invByGrade, boardOpts);
-    boardStates[k].cells = result.cellsSnapshot ?? boardStates[k].cells;
-
-    // DFS 中の消費は探索復帰時に戻るため、採用配置だけここで実消費する。
-    for (const p of result.placements) {
-      invByGrade[p.grade][p.shape]--;
-      const pid = pieceIdPool[p.grade][p.shape].pop();
-      const cells = p.orient.map(([dr, dc]) => [p.baseR + dr, p.baseC + dc]);
-      placements.push({ boardKey: k, pieceId: pid, grade: p.grade, cells });
+    // 盤ごとに固定(locked)と既存配置の状態をコピー
+    const boardStates = {};
+    for (const k of keys) {
+      boardStates[k] = {
+        cells: state.boards[k].cells.map(r => r.slice()),
+        locked: state.boards[k].locked.map(r => r.slice()),
+        meta: BOARDS[k]
+      };
     }
-    if (boardOpts.timedOut) solveOpts._anyTimedOut = true;
-  }
 
-  // 反映
-  for (const k of keys) {
-    state.boards[k].cells = boardStates[k].cells;
-    // locked は変更しない (ユーザー指定のみ locked)
-  }
-  for (const p of placements) {
-    const bs = state.boards[p.boardKey];
-    for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
-  }
-
-  const unused = [];
-  for (const g of GRADES) {
-    for (const s of SHAPES) {
-      for (const id of pieceIdPool[g.key][s]) unused.push({ id, grade: g.key, shape: s });
+    // 既存の非ロックセルはソルバー用にクリア(前回の配置を消す)
+    for (const k of keys) {
+      keepNotesForLockedPieces(state.boards[k]);
+      for (let r = 0; r < boardStates[k].meta.rows; r++) {
+        for (let c = 0; c < boardStates[k].meta.cols; c++) {
+          if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
+          if (!state.boards[k].locked[r][c]) state.boards[k].pieceIds[r][c] = null;
+        }
+      }
+      pruneOrphanNotes(state.boards[k]);
     }
+
+    const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
+
+    // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const boardOpts = createSolverRunOptions(profile, k, i + 1, keys.length);
+      const result = await solveBoard(boardStates[k], invByGrade, boardOpts);
+      boardStates[k].cells = result.cellsSnapshot ?? boardStates[k].cells;
+
+      // DFS 中の消費は探索復帰時に戻るため、採用配置だけここで実消費する。
+      for (const p of result.placements) {
+        invByGrade[p.grade][p.shape]--;
+        const pid = pieceIdPool[p.grade][p.shape].pop();
+        const cells = p.orient.map(([dr, dc]) => [p.baseR + dr, p.baseC + dc]);
+        placements.push({ boardKey: k, pieceId: pid, grade: p.grade, cells });
+      }
+      if (boardOpts.timedOut) solveOpts._anyTimedOut = true;
+      await yieldToBrowser();
+    }
+
+    // 反映
+    for (const k of keys) {
+      state.boards[k].cells = boardStates[k].cells;
+      // locked は変更しない (ユーザー指定のみ locked)
+    }
+    for (const p of placements) {
+      const bs = state.boards[p.boardKey];
+      for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
+    }
+
+    const unused = [];
+    for (const g of GRADES) {
+      for (const s of SHAPES) {
+        for (const id of pieceIdPool[g.key][s]) unused.push({ id, grade: g.key, shape: s });
+      }
+    }
+    state.solveResult = { placements, unused };
+
+    saveState();
+    renderBoards();
+    renderUnused();
+
+    const msg = `[${profile.label}] 最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
+    const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
+    const timeoutMsg = solveOpts._anyTimedOut ? ` | ⚠ ${profile.perBoardMs / 1000}秒/盤の最良解を表示中` : '';
+    setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
+  } catch (err) {
+    console.error(err);
+    setStatus(`計算中にエラーが発生しました: ${err.message || err}`);
+  } finally {
+    solveInProgress = false;
+    setControlsDisabled(false);
   }
-  state.solveResult = { placements, unused };
+}
 
-  saveState();
-  renderBoards();
-  renderUnused();
 
-  const modeMsg = precise ? '[精密]' : '[基本]';
-  const msg = `${modeMsg} 最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
-  const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
-  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示中。精密モードで再計算可能' : '';
-  setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
+function createSolverRunOptions(profile, boardKey, boardIndex, boardTotal) {
+  const now = performance.now();
+  return {
+    profile,
+    boardKey,
+    boardIndex,
+    boardTotal,
+    deadline: now + profile.perBoardMs,
+    nextYieldAt: now + profile.yieldEveryMs,
+    nextStatusAt: now,
+    nodes: 0,
+    timedOut: false
+  };
+}
+
+function setControlsDisabled(disabled) {
+  document.querySelectorAll('button, select, input').forEach(control => {
+    control.disabled = disabled;
+  });
+}
+
+function maybeYieldSolver(opts) {
+  opts.nodes++;
+  const now = performance.now();
+  if (now > opts.deadline) {
+    opts.timedOut = true;
+    return null;
+  }
+  if (now < opts.nextYieldAt) return null;
+
+  if (now >= opts.nextStatusAt) {
+    const remainingMs = Math.max(0, opts.deadline - now);
+    setStatus(
+      `[${opts.profile.label}] 計算中... ` +
+      `${BOARDS[opts.boardKey].name} (${opts.boardIndex}/${opts.boardTotal}) ` +
+      `残り約${Math.ceil(remainingMs / 1000)}秒`
+    );
+    opts.nextStatusAt = now + opts.profile.statusEveryMs;
+  }
+
+  opts.nextYieldAt = now + opts.profile.yieldEveryMs;
+  return yieldToBrowser();
+}
+
+function yieldToBrowser() {
+  return new Promise(resolve => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
 }
 
 function collectPieceIds(bs, onlyLocked = false) {
@@ -1190,9 +1272,8 @@ function greedySeed(boardState, shapeInv, qualityPrefix, meta) {
   };
 }
 
-function solveBoard(boardState, invByGrade, opts) {
+async function solveBoard(boardState, invByGrade, opts) {
   const { meta } = boardState;
-  const deadline = opts.deadline;
 
   const shapeInv = aggregateShapeInventory(invByGrade);
   const qualityPrefix = computeQualityPrefix(shapeInv);
@@ -1228,12 +1309,11 @@ function solveBoard(boardState, invByGrade, opts) {
     }
   }
 
-  function dfs() {
+  async function dfs() {
     considerCurrent();
-    if (deadline && performance.now() > deadline) {
-      opts.timedOut = true;
-      return;
-    }
+    const pause = maybeYieldSolver(opts);
+    if (pause) await pause;
+    if (opts.timedOut) return;
 
     const ub = upperBound(boardState, invByGrade, shapeInv, used, curQualitySum());
     if (compareScores(ub, best.score) <= 0) return;
@@ -1261,7 +1341,7 @@ function solveBoard(boardState, invByGrade, opts) {
         });
       }
 
-      dfs();
+      await dfs();
 
       currentPlacements.pop();
       currentPlacements.pop();
@@ -1292,7 +1372,7 @@ function solveBoard(boardState, invByGrade, opts) {
           used[s]++;
           currentPlacements.push({ shape: s, orient, baseR, baseC });
 
-          dfs();
+          await dfs();
 
           currentPlacements.pop();
           used[s]--;
@@ -1305,11 +1385,11 @@ function solveBoard(boardState, invByGrade, opts) {
     }
 
     boardState.cells[empty.r][empty.c] = '__SKIP__';
-    dfs();
+    await dfs();
     boardState.cells[empty.r][empty.c] = null;
   }
 
-  dfs();
+  await dfs();
 
   // best.placements は seed 由来なら grade 付き、DFS 由来なら未割当 → post-hoc 割当。
   let placementsWithGrade;
