@@ -131,7 +131,8 @@ let modeStore = createDefaultModeStore();
 function createDefaultModeStore() {
   return {
     activeMode: 0,
-    modes: DEFAULT_MODE_NAMES.map(name => ({ name, snapshot: {} }))
+    modes: DEFAULT_MODE_NAMES.map(name => ({ name, snapshot: {} })),
+    unitMemo: [] // 全モード共通の所持ユニット記録
   };
 }
 
@@ -147,9 +148,33 @@ function serializeStateSnapshot() {
     inventory: state.inventory,
     solveResult: state.solveResult,
     inventoryMode: state.inventoryMode,
-    unitMemo: state.unitMemo,
     precisePriority: state.precisePriority
+    // unitMemo は全モード共通のため modeStore のルートに保存し、ここには含めない
   };
+}
+
+function sanitizeMemoEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const grade = gradeMap[entry.grade] ? entry.grade : 'better';
+  const shape = SHAPES.includes(entry.shape) ? entry.shape : 'O';
+  const effect = EFFECT_KEYS.has(entry.effect) ? entry.effect : null;
+  const count = Math.max(1, Math.min(99, Math.floor(Number(entry.count) || 1)));
+  const id = typeof entry.id === 'string' && entry.id ? entry.id : newMemoId();
+  return { id, grade, shape, effect, count };
+}
+
+function sanitizeMemoList(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of list) {
+    const clean = sanitizeMemoEntry(entry);
+    if (!clean) continue;
+    if (seen.has(clean.id)) continue;
+    seen.add(clean.id);
+    out.push(clean);
+  }
+  return out;
 }
 
 function applySnapshotToState(snap) {
@@ -214,19 +239,7 @@ function applySnapshotToState(snap) {
     state.inventoryMode = snap.inventoryMode;
   }
 
-  if (Array.isArray(snap.unitMemo)) {
-    state.unitMemo = snap.unitMemo
-      .map(entry => {
-        if (!entry || typeof entry !== 'object') return null;
-        const grade = gradeMap[entry.grade] ? entry.grade : 'better';
-        const shape = SHAPES.includes(entry.shape) ? entry.shape : 'O';
-        const effect = EFFECT_KEYS.has(entry.effect) ? entry.effect : null;
-        const count = Math.max(1, Math.min(99, Math.floor(Number(entry.count) || 1)));
-        const id = typeof entry.id === 'string' && entry.id ? entry.id : newMemoId();
-        return { id, grade, shape, effect, count };
-      })
-      .filter(Boolean);
-  }
+  // unitMemo は modeStore のルートで共有しているのでスナップショットからは読まない
 
   if (snap.precisePriority && typeof snap.precisePriority === 'object') {
     const valid = {};
@@ -266,6 +279,24 @@ function normalizeModeStore(rawStore) {
 
   const active = Number(source.activeMode);
   normalized.activeMode = Number.isInteger(active) && active >= 0 && active < MODE_COUNT ? active : 0;
+
+  // 共有 unitMemo: ルート優先。無ければ各モードのスナップショットから移行
+  // (旧バージョン互換)。共通 ID は先に出てきたものを採用。
+  if (Array.isArray(source.unitMemo) && source.unitMemo.length) {
+    normalized.unitMemo = sanitizeMemoList(source.unitMemo);
+  } else {
+    const merged = [];
+    for (const mode of normalized.modes) {
+      const memo = mode.snapshot && mode.snapshot.unitMemo;
+      if (Array.isArray(memo)) merged.push(...memo);
+    }
+    normalized.unitMemo = sanitizeMemoList(merged);
+  }
+  // 移行後はスナップショット側の unitMemo を削除して二重保持を防ぐ
+  for (const mode of normalized.modes) {
+    if (mode.snapshot && 'unitMemo' in mode.snapshot) delete mode.snapshot.unitMemo;
+  }
+
   return normalized;
 }
 
@@ -302,11 +333,19 @@ function loadModeStore() {
 
 function saveState() {
   modeStore.modes[modeStore.activeMode].snapshot = serializeStateSnapshot();
+  modeStore.unitMemo = state.unitMemo; // 参照を最新化 (mutation はその場で反映済)
   persistModeStore();
+}
+
+function syncSharedFromStore() {
+  // 共有データを active state へ反映。state.unitMemo は modeStore.unitMemo と
+  // 同じ配列参照を保ち、編集 (push/splice/フィールド更新) はそのまま全モードへ波及する。
+  state.unitMemo = modeStore.unitMemo;
 }
 
 function loadState() {
   loadModeStore();
+  syncSharedFromStore();
   applySnapshotToState(modeStore.modes[modeStore.activeMode].snapshot);
 }
 
@@ -421,6 +460,7 @@ function switchMode(idx) {
   hideManualPicker();
   hideMemoPicker();
   initState();
+  syncSharedFromStore();
   applySnapshotToState(modeStore.modes[idx].snapshot);
   syncControlsToState();
   renderModeTabs();
@@ -1121,8 +1161,16 @@ function renderMemoList() {
     del.className = 'memo-delete';
     del.textContent = '削除';
     del.addEventListener('click', () => {
-      state.unitMemo = state.unitMemo.filter(m => m.id !== memo.id);
+      // 共有配列を破壊せず in-place 削除 (modeStore.unitMemo の参照を維持)
+      const idx = state.unitMemo.findIndex(m => m.id === memo.id);
+      if (idx >= 0) state.unitMemo.splice(idx, 1);
+      // 全モードの優先度から該当 ID をスクラブ
       delete state.precisePriority[memo.id];
+      for (let i = 0; i < modeStore.modes.length; i++) {
+        if (i === modeStore.activeMode) continue;
+        const snap = modeStore.modes[i].snapshot;
+        if (snap && snap.precisePriority) delete snap.precisePriority[memo.id];
+      }
       saveState();
       renderInventory();
     });
